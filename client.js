@@ -651,14 +651,14 @@ window.__ModuleLoader__.load({
         window.__fallbackQueueSession = ctx.remote.session;
         await ctx.inject(
           ['slots', 'remote', 'remote.settings', 'remote.dsh-model-fallback-queue'],
-          (rctx) => registerSlots(rctx),
+          (rctx) => registerSlots(rctx, rctx.remote?.['dsh-model-fallback-queue']),
         );
       },
     };
 
-    function registerSlots(ctx) {
+    function registerSlots(ctx, rpcFace) {
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
-        // v1 先走 cordis inspect/remote 通用通道；具体 RPC 方法由 host 侧 SettingsForms 提供。
+        // rpcFace = 内层 inject 显式注入的 'remote.dsh-model-fallback-queue' face（ctx.remote 上未必有该键）。
         const host = {
           async getSettings() {
             try {
@@ -695,7 +695,7 @@ window.__ModuleLoader__.load({
           async getRuntimeSnapshot() {
             // 运行态经 host 侧 FallbackQueueService RPC（typert SRC fallback）获取
             try {
-              const remote = ctx.remote?.['dsh-model-fallback-queue'];
+              const remote = rpcFace;
               if (!remote?.snapshot) return null;
               return (await remote.snapshot()) ?? null;
             } catch (e) {
@@ -705,7 +705,7 @@ window.__ModuleLoader__.load({
           },
           async probe(index) {
             try {
-              return await ctx.remote?.['dsh-model-fallback-queue']?.probe?.(index) ?? { ok: false };
+              return await rpcFace?.probe?.(index) ?? { ok: false };
             } catch (e) {
               console.warn('[fallback-queue] probe failed', e);
               return { ok: false };
@@ -713,7 +713,7 @@ window.__ModuleLoader__.load({
           },
           async manualFailback(index) {
             try {
-              return await ctx.remote?.['dsh-model-fallback-queue']?.manualFailback?.(index) ?? { ok: false };
+              return await rpcFace?.manualFailback?.(index) ?? { ok: false };
             } catch (e) {
               console.warn('[fallback-queue] manualFailback failed', e);
               return { ok: false };
