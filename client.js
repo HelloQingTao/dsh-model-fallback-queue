@@ -535,7 +535,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
                 entries.length === 0
-                  ? h('div', { style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '队列为空，到设置页添加后备模型')
+                  ? h('div', { style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, 'P1 = 当前会话模型（动态跟随），暂无后备——到设置页添加 P2/P3…')
                   : entries.map((e) => {
                       const isActive = e.index === active;
                       return h(
