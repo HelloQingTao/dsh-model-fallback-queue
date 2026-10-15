@@ -414,8 +414,12 @@ window.__ModuleLoader__.load({
       // 从内置模型选择按钮 title 解析当前会话模型名（title 形如「选择模型，当前 GLM-5.3-Flash · x0.06，推理等级 Default」）
       React.useEffect(() => {
         const pull = () => {
-          const btn = Array.from(document.querySelectorAll('button[title^="选择模型"]')).pop();
-          const m = btn?.getAttribute('title')?.match(/当前 ([^·,，]+)/) || btn?.getAttribute('title')?.match(/当前 (.+?)(?:，|,|$)/);
+          const btn = Array.from(document.querySelectorAll('button[title], button[aria-label]')).find(
+            (x) => (x.getAttribute('title') || x.getAttribute('aria-label') || '').startsWith('选择模型'),
+          );
+          const raw = btn?.getAttribute('title') || btn?.getAttribute('aria-label') || '';
+          // 兼容两种格式：「…当前 GLM-5.3-Flash · x0.06…」/「…当前 DeepSeek V4.1 Flash (CC)，…」/纯「名 · 等级」
+          const m = raw.match(/当前 ([^·,，，]+)/) || raw.match(/^(.+?)\s*·/);
           if (m) setSessionModelLabel(m[1].trim());
         };
         pull();
