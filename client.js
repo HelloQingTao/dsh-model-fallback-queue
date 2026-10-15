@@ -187,23 +187,27 @@ window.__ModuleLoader__.load({
                           ? h(
                               'div',
                               { style: { paddingBottom: 6 } },
-                              (g.models || []).map((m) =>
-                                h(
+                              (g.models || []).map((m) => {
+                                const key = `${g.id}/${m.id}`;
+                                const inQueue = existing.includes(key);
+                                return h(
                                   'button',
                                   {
                                     key: m.id,
-                                    onClick: () => onPick(g.id, m.id),
+                                    disabled: inQueue,
+                                    onClick: () => { if (!inQueue) onPick(g.id, m.id); },
                                     style: {
                                       width: '100%', textAlign: 'left', padding: '7px 14px 7px 22px',
                                       background: 'transparent', border: 'none', color: 'inherit',
-                                      cursor: 'pointer', fontSize: 13, borderRadius: 6,
+                                      cursor: inQueue ? 'not-allowed' : 'pointer', fontSize: 13, borderRadius: 6,
+                                      opacity: inQueue ? 0.45 : 1,
                                     },
-                                    onMouseEnter: (e) => { e.currentTarget.style.background = 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14'; },
+                                    onMouseEnter: (e) => { if (!inQueue) e.currentTarget.style.background = 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14'; },
                                     onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent'; },
                                   },
-                                  m.name || m.id,
-                                ),
-                              ),
+                                  (m.name || m.id) + (inQueue ? ' · 已添加' : ''),
+                                );
+                              }),
                             )
                           : null,
                       ),
