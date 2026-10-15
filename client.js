@@ -569,12 +569,16 @@ window.__ModuleLoader__.load({
                     key: 'p1-row',
                     style: {
                       display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
-                      background: active === -1 ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      background: (active === -1 || (active === 0 && p1Follow)) ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
-                  h('span', { style: { flex: 1, opacity: 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sessionModelLabel),
-                  h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', fontStyle: 'italic' } }, '会话模型'),
+                  h('span', { style: { flex: 1, opacity: (active === 0 && p1Follow) ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                    sessionModelLabel + (p1Follow ? '（会话模型）' : '')),
+                  (active === 0 && p1Follow)
+                    ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
+                    : null,
+                  h(Badge, { tone: 'ok' }, '正常'),
                   ),
                 ...(entries.length === 0
                   ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
