@@ -373,20 +373,22 @@ window.__ModuleLoader__.load({
               },
             })
           : null,
-        // 功能说明
+        // 功能说明（淡化、与上方内容拉开距离）
         h(
           'div',
           {
             style: {
-              fontSize: 13,
+              marginTop: 20,
+              paddingTop: 12,
+              borderTop: '1px solid var(--dsw-elevation-stroke-color, transparent)',
+              fontSize: 12,
               lineHeight: 1.7,
               color: 'var(--dsw-alias-label-secondary)',
-              opacity: cfg.enabled ? 1 : 0.55,
-              transition: 'opacity .2s',
+              opacity: 0.65,
             },
           },
-          h('div', null, '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话，无需手动干预。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。'),
-          h('div', { style: { marginTop: 4 } }, '状态说明：🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用'),
+          h('div', null, '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。'),
+          h('div', { style: { marginTop: 2 } }, '🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用'),
         ),
       );
     }
