@@ -255,6 +255,7 @@ window.__ModuleLoader__.load({
     function Chip({ host, onOpenSettings }) {
       const [snap, setSnap] = React.useState(null);
       const [open, setOpen] = React.useState(false);
+      const rootRef = React.useRef(null);
 
       React.useEffect(() => {
         let alive = true;
@@ -270,6 +271,23 @@ window.__ModuleLoader__.load({
         };
       }, [host]);
 
+      // 点击弹层外部自动关闭
+      React.useEffect(() => {
+        if (!open) return;
+        const onDown = (e) => {
+          if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+        };
+        const onKey = (e) => {
+          if (e.key === 'Escape') setOpen(false);
+        };
+        document.addEventListener('mousedown', onDown, true);
+        document.addEventListener('keydown', onKey);
+        return () => {
+          document.removeEventListener('mousedown', onDown, true);
+          document.removeEventListener('keydown', onKey);
+        };
+      }, [open]);
+
       const enabled = snap?.enabled;
       const entries = snap?.entries || [];
       const active = snap?.activeIndex ?? 0;
@@ -278,35 +296,65 @@ window.__ModuleLoader__.load({
 
       let label;
       let tone = 'muted';
-      if (!enabled) label = 'P-';
+      if (!enabled) label = 'P';
       else if (allOpen) {
-        label = '全部熔断';
+        label = 'P!';
         tone = 'error';
       } else if (halfOpen) {
-        label = `P${active + 1} 探测中`;
+        label = `P${active + 1}`;
         tone = 'warn';
       } else {
         label = `P${active + 1}`;
         tone = active === 0 ? 'ok' : 'warn';
       }
 
+      const toneColor = {
+        ok: 'var(--dsw-alias-color-success, #3a9e5f)',
+        warn: 'var(--dsw-alias-color-warning, #c98a1b)',
+        error: 'var(--dsw-alias-color-danger, #c94141)',
+        muted: 'var(--dsw-alias-color-text-secondary, #888)',
+      }[tone];
+
       return h(
         'div',
-        { style: { position: 'relative' } },
+        { ref: rootRef, style: { position: 'relative', display: 'inline-flex' } },
         h(
           'button',
           {
             onClick: () => setOpen((v) => !v),
+            title: '模型故障转移',
+            'aria-label': '模型故障转移',
             style: {
-              ...btnSmall,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
+              position: 'relative',
+              width: 26,
+              height: 26,
+              borderRadius: 8,
+              border: '1px solid var(--dsw-alias-color-border, #ddd)',
+              background: 'var(--dsw-alias-color-surface, transparent)',
+              color: 'inherit',
+              cursor: 'pointer',
               fontSize: 12,
+              fontWeight: 600,
+              lineHeight: '24px',
+              padding: 0,
+              transition: 'border-color .15s, box-shadow .15s',
+              boxShadow: open ? `0 0 0 2px ${toneColor}33` : 'none',
             },
           },
-          h('span', { 'aria-hidden': true }, '⇄'),
           label,
+          // 右上角健康状态小圆点
+          h('span', {
+            style: {
+              position: 'absolute',
+              top: -3,
+              right: -3,
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: toneColor,
+              border: '1.5px solid var(--dsw-alias-color-surface, #fff)',
+            },
+          }),
         ),
         open
           ? h(
@@ -314,45 +362,104 @@ window.__ModuleLoader__.load({
               {
                 style: {
                   position: 'absolute',
-                  bottom: 'calc(100% + 8px)',
+                  bottom: 'calc(100% + 10px)',
                   right: 0,
-                  minWidth: 280,
-                  padding: 10,
-                  borderRadius: 10,
+                  minWidth: 300,
+                  borderRadius: 12,
                   border: '1px solid var(--dsw-alias-color-border, #ddd)',
                   background: 'var(--dsw-alias-color-surface, #fff)',
-                  boxShadow: '0 4px 16px rgba(0,0,0,.12)',
+                  boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
                   zIndex: 30,
+                  overflow: 'hidden',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 6,
                 },
               },
-              allOpen
-                ? h(Badge, { tone: 'error' }, '全部熔断：请求按原模型放行')
-                : null,
-              entries.length === 0
-                ? h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-color-text-secondary)' } }, '队列为空')
-                : entries.map((e) =>
-                    h(
-                      'div',
-                      { key: e.index, style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
-                      h('strong', { style: { width: 24 } }, `P${e.index + 1}`),
-                      h('span', { style: { flex: 1, opacity: e.index === active ? 1 : 0.7 } }, `${e.provider} / ${e.model}`),
-                      h(Badge, { tone: STATE_TONE[e.state] || 'muted' }, STATE_TEXT[e.state] || e.state),
-                    ),
-                  ),
-              snap?.lastSwitch
-                ? h(
-                    'div',
-                    { style: { fontSize: 11, color: 'var(--dsw-alias-color-text-secondary)' } },
-                    `最近切换：P${snap.lastSwitch.from + 1} → P${snap.lastSwitch.to + 1}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
-                  )
-                : null,
+              // 标题行
               h(
-                'button',
-                { onClick: onOpenSettings, style: { ...btnSmall, alignSelf: 'flex-end' } },
-                '设置…',
+                'div',
+                {
+                  style: {
+                    padding: '10px 14px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    borderBottom: '1px solid var(--dsw-alias-color-border, #eee)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  },
+                },
+                '模型故障转移',
+                allOpen
+                  ? h(Badge, { tone: 'error' }, '全部熔断')
+                  : h(Badge, { tone: enabled ? 'ok' : 'muted' }, enabled ? '运行中' : '已关闭'),
+              ),
+              // 队列条目
+              h(
+                'div',
+                { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
+                entries.length === 0
+                  ? h('div', { style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-color-text-secondary)' } }, '队列为空，到设置页添加后备模型')
+                  : entries.map((e) => {
+                      const isActive = e.index === active;
+                      return h(
+                        'div',
+                        {
+                          key: e.index,
+                          style: {
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            padding: '7px 8px',
+                            borderRadius: 8,
+                            fontSize: 12,
+                            background: isActive ? 'var(--dsw-alias-color-accent, #4f7cf7)' + '14' : 'transparent',
+                          },
+                        },
+                        h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + 1}`),
+                        h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
+                        isActive
+                          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-color-accent, #4f7cf7)', fontWeight: 600 } }, '当前')
+                          : null,
+                        h(Badge, { tone: STATE_TONE[e.state] || 'muted' }, STATE_TEXT[e.state] || e.state),
+                      );
+                    }),
+              ),
+              // 底部：最近切换 + 设置入口
+              h(
+                'div',
+                {
+                  style: {
+                    padding: '8px 14px',
+                    borderTop: '1px solid var(--dsw-alias-color-border, #eee)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: 11,
+                    color: 'var(--dsw-alias-color-text-secondary)',
+                  },
+                },
+                snap?.lastSwitch
+                  ? `最近切换 P${snap.lastSwitch.from + 1} → P${snap.lastSwitch.to + 1}`
+                  : '无切换记录',
+                onOpenSettings
+                  ? h(
+                      'button',
+                      {
+                        onClick: onOpenSettings,
+                        style: {
+                          fontSize: 11,
+                          padding: '3px 10px',
+                          borderRadius: 6,
+                          border: '1px solid var(--dsw-alias-color-border, #ddd)',
+                          background: 'transparent',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                        },
+                      },
+                      '设置…',
+                    )
+                  : null,
               ),
             )
           : null,
@@ -369,17 +476,21 @@ window.__ModuleLoader__.load({
         const host = {
           async getSettings() {
             try {
+              // settings.describe() 返回 SettingsDescriptor[]（按 entry id 平铺），不是 {namespaces}
               const doc = await ctx.remote?.settings?.describe?.();
-              const ns = doc?.namespaces?.find((n) => n.ns === 'dsh-model-fallback-queue');
-              return ns?.value;
-            } catch {
+              const list = Array.isArray(doc) ? doc : doc?.namespaces;
+              const ns = (list || []).find((n) => n.ns === 'dsh-model-fallback-queue');
+              return ns?.value ?? null;
+            } catch (e) {
+              console.warn('[fallback-queue] getSettings failed', e);
               return null;
             }
           },
           async updateSettings(patch) {
             try {
               const doc = await ctx.remote?.settings?.describe?.();
-              const ns = doc?.namespaces?.find((n) => n.ns === 'dsh-model-fallback-queue');
+              const list = Array.isArray(doc) ? doc : doc?.namespaces;
+              const ns = (list || []).find((n) => n.ns === 'dsh-model-fallback-queue');
               await ctx.remote?.settings?.update?.(
                 'dsh-model-fallback-queue',
                 patch,
@@ -390,11 +501,30 @@ window.__ModuleLoader__.load({
             }
           },
           async getRuntimeSnapshot() {
-            // v1：运行态经 host 侧轮询转发尚缺；先返回 null，芯片只显示配置态
+            // 运行态经 host 侧 FallbackQueueService RPC（typert SRC fallback）获取
             try {
-              return await ctx.remote?.['dsh-model-fallback-queue']?.snapshot?.() ?? null;
-            } catch {
+              const remote = ctx.remote?.['dsh-model-fallback-queue'];
+              if (!remote?.snapshot) return null;
+              return (await remote.snapshot()) ?? null;
+            } catch (e) {
+              console.warn('[fallback-queue] snapshot failed', e);
               return null;
+            }
+          },
+          async probe(index) {
+            try {
+              return await ctx.remote?.['dsh-model-fallback-queue']?.probe?.(index) ?? { ok: false };
+            } catch (e) {
+              console.warn('[fallback-queue] probe failed', e);
+              return { ok: false };
+            }
+          },
+          async manualFailback(index) {
+            try {
+              return await ctx.remote?.['dsh-model-fallback-queue']?.manualFailback?.(index) ?? { ok: false };
+            } catch (e) {
+              console.warn('[fallback-queue] manualFailback failed', e);
+              return { ok: false };
             }
           },
         };

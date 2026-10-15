@@ -162,6 +162,74 @@ function createRouter(config, log) {
   };
 }
 
+// typert-protocol 只存在于 dsh 主包 node_modules，profile 链接解析不到（loader 无全局别名），
+// 用绝对路径 import 直达主包内副本（该副本自身依赖可正常解析）。
+import { TypertRemoteService } from '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-protocol/lib/index.js';
+// schemastery：profile 顶层可用但插件目录向上解析不到（同 typert-protocol），走绝对路径；
+// Config 必须是它（toJSON 信封供 dsh-settings 派生 settings namespace，~standard 供 cordis 校验）
+import s from '/Users/hellocta/.dsh/profiles/web/node_modules/@deepseek-ai/schemastery/lib/index.mjs';
+
+const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-methods';
+
+/** 给原型打 Remote 方法标记（等价于 TS 装饰器编译产物） */
+function markRemoteMethods(prototype, methods) {
+  Object.defineProperty(prototype, REMOTE_METHOD_DESCRIPTOR, {
+    configurable: true,
+    value: Object.freeze({
+      version: 1,
+      methods: Object.freeze(
+        methods.map((m) => Object.freeze({ method: m, invocation: Object.freeze({ kind: 'direct' }) })),
+      ),
+    }),
+  });
+}
+
+/**
+ * 运行态 RPC 服务：浏览器半区经 ctx.remote['dsh-model-fallback-queue'].snapshot() 调用。
+ * cordis 类插件实例化只传 (ctx, config)，故 router 经模块级桥接获取。
+ */
+let serviceBridge = null; // { router, config, saveSettings } 由 apply 设置
+
+class FallbackQueueService extends TypertRemoteService {
+  static inject = [];
+
+  constructor(ctx) {
+    super(ctx, 'FallbackQueueService', { namespace: 'dsh-model-fallback-queue' });
+    if (!serviceBridge) throw new Error('fallback-queue: service bridge missing');
+    this.router = serviceBridge.router;
+    this.config = serviceBridge.config;
+  }
+
+  /** 运行态快照 */
+  snapshot() {
+    return this.router.snapshot();
+  }
+
+  /** 手动探测：强制指定索引的熔断器进半开 */
+  probe(index) {
+    const route = this.config.queue?.[index];
+    if (!route) return { ok: false };
+    const c = this.router.circuits.get(this.router.keyOf(route));
+    if (c) {
+      c.state = CIRCUIT.HALF_OPEN;
+      c.openedAt = 0;
+    }
+    return { ok: true };
+  }
+
+  /** 手动回切：把 activeIndex 拉回指定索引（默认 P1=0） */
+  manualFailback(index) {
+    const i = Number.isFinite(index) ? index : 0;
+    const route = this.config.queue?.[i];
+    if (!route) return { ok: false };
+    const from = this.router.runtime.activeIndex;
+    this.router.runtime.activeIndex = i;
+    this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
+    return { ok: true };
+  }
+}
+markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback']);
+
 export const inject = ['settings'];
 
 export function apply(ctx) {
@@ -259,7 +327,13 @@ export function apply(ctx) {
     loadSettings();
   });
 
-  // 导出内部状态供后续 RPC/调试（暂不挂 Remote，先跑通本地）
+  // ---- 运行态 RPC 服务 ----
+  serviceBridge = { router, config, saveSettings };
+  ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
+  ctx.effect(() => () => {
+    serviceBridge = null;
+  }, 'fallback-queue bridge cleanup');
+
   return {
     router,
     saveSettings,
@@ -267,29 +341,22 @@ export function apply(ctx) {
   };
 }
 
-export const Config = {
-  type: 'object',
-  properties: {
-    enabled: { type: 'boolean', default: false, description: '启用故障转移' },
-    queue: {
-      type: 'array',
-      default: [],
-      description: '故障转移队列，索引 0 为 P1',
-      items: {
-        type: 'object',
-        properties: {
-          provider: { type: 'string' },
-          model: { type: 'string' },
-          manual: { type: 'boolean', default: false, description: 'P1 手动锁定' },
-        },
-        required: ['provider', 'model'],
-      },
-    },
-    p1Follow: { type: 'boolean', default: true, description: 'P1 跟随当前模型' },
-    immediateCodes: { type: 'array', default: DEFAULT_IMMEDIATE_CODES, items: { type: 'string' } },
-    failureThreshold: { type: 'number', default: 2 },
-    cooldownMs: { type: 'number', default: 60_000 },
-    failbackMode: { type: 'string', enum: ['sticky', 'probe', 'manual'], default: 'sticky' },
-    failbackDelayMs: { type: 'number', default: 300_000 },
-  },
-};
+/**
+ * 极简 Standard Schema (~/standard) 实现：零依赖，避免插件解析 zod 的路径问题。
+ * 只做「透传 + 填默认值 + 类型宽校验」，验错抛 issues。
+ */
+export const Config = s.object({
+  enabled: s.boolean().default(DEFAULT_CONFIG.enabled).description('启用故障转移').volatile(),
+  queue: s.array(
+    s.object({
+      provider: s.string().required().description('provider id'),
+      model: s.string().required().description('model id'),
+    }).required(),
+  ).default([]).description('故障转移队列 P1→Pn').volatile(),
+  p1Follow: s.boolean().default(DEFAULT_CONFIG.p1Follow).description('P1 跟随当前会话模型').volatile(),
+  immediateCodes: s.array(s.string()).default(DEFAULT_IMMEDIATE_CODES).description('命中即熔断的错误码').volatile(),
+  failureThreshold: s.number().default(DEFAULT_CONFIG.failureThreshold).description('连续失败次数阈值（软熔断）').volatile(),
+  cooldownMs: s.number().default(DEFAULT_CONFIG.cooldownMs).description('熔断冷却毫秒').volatile(),
+  failbackMode: s.union(['sticky', 'probe', 'manual']).default(DEFAULT_CONFIG.failbackMode).description('P1 恢复策略').volatile(),
+  failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
+});
