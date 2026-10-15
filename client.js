@@ -408,7 +408,20 @@ window.__ModuleLoader__.load({
     function Chip({ host, onOpenSettings }) {
       const [snap, setSnap] = React.useState(null);
       const [open, setOpen] = React.useState(false);
+      const [sessionModelLabel, setSessionModelLabel] = React.useState('当前会话模型');
       const rootRef = React.useRef(null);
+
+      // 从内置模型选择按钮 title 解析当前会话模型名（title 形如「选择模型，当前 GLM-5.3-Flash · x0.06，推理等级 Default」）
+      React.useEffect(() => {
+        const pull = () => {
+          const btn = Array.from(document.querySelectorAll('button[title^="选择模型"]')).pop();
+          const m = btn?.getAttribute('title')?.match(/当前 ([^·,，]+)/);
+          if (m) setSessionModelLabel(m[1].trim());
+        };
+        pull();
+        const t = setInterval(pull, 3000);
+        return () => clearInterval(t);
+      }, []);
 
       React.useEffect(() => {
         let alive = true;
@@ -546,8 +559,19 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
-                entries.length === 0
-                  ? h('div', { style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, 'P1 = 当前会话模型（动态跟随），暂无后备——到设置页添加 P2/P3…')
+                h('div', {
+                    key: 'p1-row',
+                    style: {
+                      display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
+                      background: active === -1 ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                    },
+                  },
+                  h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
+                  h('span', { style: { flex: 1, opacity: 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sessionModelLabel),
+                  h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', fontStyle: 'italic' } }, '会话模型'),
+                  ),
+                ...(entries.length === 0
+                  ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
                   : entries.map((e) => {
                       const isActive = e.index === active;
                       return h(
@@ -571,7 +595,7 @@ window.__ModuleLoader__.load({
                           : null,
                         h(Badge, { tone: STATE_TONE[e.state] || 'muted' }, STATE_TEXT[e.state] || e.state),
                       );
-                    }),
+                    })),
               ),
               // 底部：最近切换 + 设置入口
               h(
@@ -588,7 +612,7 @@ window.__ModuleLoader__.load({
                   },
                 },
                 snap?.lastSwitch
-                  ? `最近切换 P${snap.lastSwitch.from + 1} → P${snap.lastSwitch.to + 1}`
+                  ? `最近切换 P${snap.lastSwitch.from + ((snap.p1Follow ?? true) ? 2 : 1)} → P${snap.lastSwitch.to + ((snap.p1Follow ?? true) ? 2 : 1)}`
                   : '无切换记录',
                 onOpenSettings
                   ? h(
