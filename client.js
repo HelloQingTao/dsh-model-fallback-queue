@@ -83,6 +83,136 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ---------- 模型选择器（数据来自 remote.session.modelCatalog，同内置模型选择器） ----------
+
+    function ModelPicker({ onClose, onPick }) {
+      const [groups, setGroups] = React.useState(null);
+      const [err, setErr] = React.useState(null);
+      const [openProvider, setOpenProvider] = React.useState(null);
+      const rootRef = React.useRef(null);
+
+      React.useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const r = await window.__fallbackQueueSession?.modelCatalog?.();
+            if (!alive) return;
+            if (!r?.ok) throw new Error(r?.error?.message || 'modelCatalog failed');
+            setGroups(r.value?.groups || []);
+          } catch (e) {
+            if (alive) setErr(e.message || String(e));
+          }
+        })();
+        return () => { alive = false; };
+      }, []);
+
+      // 点外部 / Esc 关闭
+      React.useEffect(() => {
+        const onDown = (e) => {
+          if (rootRef.current && !rootRef.current.contains(e.target)) onClose();
+        };
+        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('mousedown', onDown, true);
+        document.addEventListener('keydown', onKey, true);
+        return () => {
+          document.removeEventListener('mousedown', onDown, true);
+          document.removeEventListener('keydown', onKey, true);
+        };
+      }, [onClose]);
+
+      return h(
+        'div',
+        {
+          ref: rootRef,
+          style: {
+            position: 'fixed', inset: 0, zIndex: 10000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,.35)',
+          },
+        },
+        h(
+          'div',
+          {
+            style: {
+              width: 460, maxHeight: '70vh', overflow: 'hidden',
+              display: 'flex', flexDirection: 'column',
+              borderRadius: 12,
+              background: 'var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-base, #fff))',
+              border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+              boxShadow: '0 8px 32px rgba(0,0,0,.18)',
+              color: 'var(--dsw-alias-label-primary, inherit)',
+            },
+          },
+          h(
+            'div',
+            {
+              style: {
+                padding: '12px 16px', fontWeight: 600, fontSize: 14,
+                borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              },
+            },
+            '添加后备模型',
+            h('button', { onClick: onClose, style: btnSmall }, '关闭'),
+          ),
+          h(
+            'div',
+            { style: { overflowY: 'auto', padding: '6px 8px' } },
+            err
+              ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, `模型目录加载失败：${err}`)
+              : !groups
+                ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '加载模型目录…')
+                : groups.length === 0
+                  ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '没有可用模型目录')
+                  : groups.map((g) =>
+                      h(
+                        'div',
+                        { key: g.id },
+                        h(
+                          'button',
+                          {
+                            onClick: () => setOpenProvider(openProvider === g.id ? null : g.id),
+                            style: {
+                              width: '100%', textAlign: 'left', padding: '8px 10px',
+                              background: 'transparent', border: 'none', color: 'inherit',
+                              cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                              borderRadius: 8,
+                            },
+                          },
+                          g.name || g.id,
+                          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, openProvider === g.id ? '▾' : '▸'),
+                        ),
+                        openProvider === g.id
+                          ? h(
+                              'div',
+                              { style: { paddingBottom: 6 } },
+                              (g.models || []).map((m) =>
+                                h(
+                                  'button',
+                                  {
+                                    key: m.id,
+                                    onClick: () => onPick(g.id, m.id),
+                                    style: {
+                                      width: '100%', textAlign: 'left', padding: '7px 14px 7px 22px',
+                                      background: 'transparent', border: 'none', color: 'inherit',
+                                      cursor: 'pointer', fontSize: 13, borderRadius: 6,
+                                    },
+                                    onMouseEnter: (e) => { e.currentTarget.style.background = 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14'; },
+                                    onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent'; },
+                                  },
+                                  m.name || m.id,
+                                ),
+                              ),
+                            )
+                          : null,
+                      ),
+                    ),
+          ),
+        ),
+      );
+    }
+
     // ---------- 设置页 ----------
 
     const STATE_TONE = { closed: 'ok', half_open: 'warn', open: 'error' };
@@ -92,6 +222,7 @@ window.__ModuleLoader__.load({
       const [cfg, setCfg] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [snap, setSnap] = React.useState(null);
+      const [pickerOpen, setPickerOpen] = React.useState(false);
 
       const refresh = React.useCallback(async () => {
         const s = await host.getSettings();
@@ -129,11 +260,7 @@ window.__ModuleLoader__.load({
       };
 
       const add = async () => {
-        const provider = window.prompt('provider 名（如 workbuddy-xdpool）');
-        if (!provider) return;
-        const model = window.prompt('model 名（如 deepseek-v4.1-flash）');
-        if (!model) return;
-        await patch({ queue: [...cfg.queue, { provider, model }] });
+        setPickerOpen(true);
       };
 
       const modes = [
@@ -236,6 +363,15 @@ window.__ModuleLoader__.load({
               { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
               `最近切换：P${snap.lastSwitch.from + 1} → P${snap.lastSwitch.to + 1}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
             )
+          : null,
+        pickerOpen
+          ? h(ModelPicker, {
+              onClose: () => setPickerOpen(false),
+              onPick: async (provider, model) => {
+                setPickerOpen(false);
+                await patch({ queue: [...cfg.queue, { provider, model }] });
+              },
+            })
           : null,
       );
     }
@@ -506,11 +642,13 @@ window.__ModuleLoader__.load({
     };
 
     return {
-      inject: ['slots', 'remote', 'remote.settings'],
+      inject: ['slots', 'remote', 'remote.settings', 'remote.session'],
       async apply(ctx) {
         // 挂载自己的 Remote namespace，然后在内层 ctx.inject 里拿 remote.dsh-model-fallback-queue face
         const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
         ctx.effect(() => () => { void disposeRemote(); }, 'fallback-queue remote mount');
+        // session face 供 ModelPicker 拉模型目录（同内置模型选择器的数据源）
+        window.__fallbackQueueSession = ctx.remote.session;
         await ctx.inject(
           ['slots', 'remote', 'remote.settings', 'remote.dsh-model-fallback-queue'],
           (rctx) => registerSlots(rctx),
