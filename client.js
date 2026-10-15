@@ -697,7 +697,10 @@ window.__ModuleLoader__.load({
             try {
               const remote = rpcFace;
               if (!remote?.snapshot) return null;
-              return (await remote.snapshot()) ?? null;
+              const r = await remote.snapshot();
+              // typert face 可能返回 {ok,value} 信封或裸值，两种都兼容
+              if (r && typeof r === 'object' && 'ok' in r) return r.ok ? (r.value ?? null) : null;
+              return r ?? null;
             } catch (e) {
               console.warn('[fallback-queue] snapshot failed', e);
               return null;
