@@ -361,7 +361,7 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
-              `最近切换：P${snap.lastSwitch.from + 1} → P${snap.lastSwitch.to + 1}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
+              `最近切换：P${snap.lastSwitch.from + ((snap.p1Follow ?? true) ? 2 : 1)} → P${snap.lastSwitch.to + ((snap.p1Follow ?? true) ? 2 : 1)}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
             )
           : null,
         pickerOpen
@@ -444,20 +444,23 @@ window.__ModuleLoader__.load({
       const enabled = snap?.enabled;
       const entries = snap?.entries || [];
       const active = snap?.activeIndex ?? 0;
+      const p1Follow = snap?.p1Follow ?? true;
       const allOpen = entries.length > 0 && entries.every((e) => e.state === 'open');
       const halfOpen = entries.some((e) => e.state === 'half_open');
 
       let label;
       let tone = 'muted';
+      // p1Follow 下队列索引 0 = P2（P1 是当前会话模型，不显示编号项）
+      const lbl = (idx) => `P${idx + (p1Follow ? 2 : 1)}`;
       if (!enabled) label = 'P';
       else if (allOpen) {
         label = 'P!';
         tone = 'error';
       } else if (halfOpen) {
-        label = `P${active + 1}`;
+        label = lbl(active);
         tone = 'warn';
       } else {
-        label = `P${active + 1}`;
+        label = lbl(active);
         tone = active === 0 ? 'ok' : 'warn';
       }
 
@@ -561,7 +564,7 @@ window.__ModuleLoader__.load({
                             background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                           },
                         },
-                        h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + 1}`),
+                        h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 2 : 1)}`),
                         h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')

@@ -147,6 +147,7 @@ function createRouter(config, log) {
       const queue = config.queue || [];
       return {
         enabled: config.enabled,
+        p1Follow: config.p1Follow,
         activeIndex: runtime.activeIndex,
         lastSwitch: runtime.lastSwitch,
         entries: queue.map((r, i) => {
