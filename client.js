@@ -469,8 +469,8 @@ window.__ModuleLoader__.load({
 
       let label;
       let tone = 'muted';
-      // p1Follow 下队列索引 0 = P2（P1 是当前会话模型，不显示编号项）
-      const lbl = (idx) => `P${idx + (p1Follow ? 2 : 1)}`;
+      // p1Follow 下 activeIndex 0 = P1（会话模型）；队列索引 i 实际是 P(i+1)
+      const lbl = (idx) => (p1Follow ? (idx === 0 ? 'P1' : `P${idx + 1}`) : `P${idx + 1}`);
       if (!enabled) label = 'P';
       else if (allOpen) {
         label = 'P!';
@@ -583,7 +583,7 @@ window.__ModuleLoader__.load({
                 ...(entries.length === 0
                   ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
                   : entries.map((e) => {
-                      const isActive = e.index === active;
+                      const isActive = e.index === active && !(p1Follow && e.index === 0);
                       return h(
                         'div',
                         {
@@ -598,7 +598,7 @@ window.__ModuleLoader__.load({
                             background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                           },
                         },
-                        h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 2 : 1)}`),
+                        h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),
                         h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
