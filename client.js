@@ -415,7 +415,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const pull = () => {
           const btn = Array.from(document.querySelectorAll('button[title^="选择模型"]')).pop();
-          const m = btn?.getAttribute('title')?.match(/当前 ([^·,，]+)/);
+          const m = btn?.getAttribute('title')?.match(/当前 ([^·,，]+)/) || btn?.getAttribute('title')?.match(/当前 (.+?)(?:，|,|$)/);
           if (m) setSessionModelLabel(m[1].trim());
         };
         pull();
