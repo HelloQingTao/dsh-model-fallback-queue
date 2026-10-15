@@ -272,6 +272,21 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 720 } },
+        // 功能说明
+        h(
+          'div',
+          {
+            style: {
+              fontSize: 13,
+              lineHeight: 1.7,
+              color: 'var(--dsw-alias-label-secondary)',
+              opacity: cfg.enabled ? 1 : 0.55,
+              transition: 'opacity .2s',
+            },
+          },
+          h('div', null, '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话，无需手动干预。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。'),
+          h('div', { style: { marginTop: 4 } }, '状态说明：🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用'),
+        ),
         // 总开关
         h(
           'div',
@@ -478,18 +493,10 @@ window.__ModuleLoader__.load({
             },
           },
           label,
-          // 右上角健康状态小圆点
+          // 右上角健康状态小圆点（带呼吸闪烁）
           h('span', {
-            style: {
-              position: 'absolute',
-              top: -3,
-              right: -3,
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: toneColor,
-              border: '1.5px solid var(--dsw-alias-bg-overlay, #fff)',
-            },
+            className: allOpen ? 'fq-dot fq-dot-fast' : enabled === false ? 'fq-dot fq-dot-off' : 'fq-dot',
+            style: { '--fq-dot-color': toneColor },
           }),
         ),
         open
@@ -657,6 +664,19 @@ window.__ModuleLoader__.load({
     };
 
     function registerSlots(ctx, rpcFace) {
+        // 健康圆点动画样式（幂等注入一次）
+        if (!document.getElementById('fq-dot-style')) {
+          const st = document.createElement('style');
+          st.id = 'fq-dot-style';
+          st.textContent = `
+            .fq-dot{position:absolute;top:-2px;right:-2px;width:5px;height:5px;border-radius:50%;
+              background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);
+              animation:fq-pulse 2s ease-in-out infinite;}
+            .fq-dot-fast{animation-duration:1s;}
+            .fq-dot-off{animation:none;opacity:.6;}
+            @keyframes fq-pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--fq-dot-color)}50%{opacity:.35;box-shadow:0 0 0 3px transparent}}`;
+          document.head.appendChild(st);
+        }
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
         // rpcFace = 内层 inject 显式注入的 'remote.dsh-model-fallback-queue' face（ctx.remote 上未必有该键）。
         const host = {
