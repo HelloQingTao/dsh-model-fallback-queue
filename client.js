@@ -414,12 +414,14 @@ window.__ModuleLoader__.load({
       // 从内置模型选择按钮 title 解析当前会话模型名（title 形如「选择模型，当前 GLM-5.3-Flash · x0.06，推理等级 Default」）
       React.useEffect(() => {
         const pull = () => {
-          const btn = Array.from(document.querySelectorAll('button[title], button[aria-label]')).find(
-            (x) => (x.getAttribute('title') || x.getAttribute('aria-label') || '').startsWith('选择模型'),
-          );
-          const raw = btn?.getAttribute('title') || btn?.getAttribute('aria-label') || '';
-          // 兼容两种格式：「…当前 GLM-5.3-Flash · x0.06…」/「…当前 DeepSeek V4.1 Flash (CC)，…」/纯「名 · 等级」
-          const m = raw.match(/当前 ([^·,，，]+)/) || raw.match(/^(.+?)\s*·/);
+          const btn = Array.from(document.querySelectorAll('button')).find((x) => {
+            const t = x.title || x.getAttribute('aria-label') || '';
+            return t.includes('选择模型') || /^(.+?)\s*·/.test(t) && x.getAttribute('aria-label')?.includes('选择模型');
+          });
+          // aria-label 形如「选择模型，当前 X，推理等级 Y」；title 形如「X · Y」
+          const al = btn?.getAttribute('aria-label') || '';
+          const ti = btn?.title || '';
+          const m = al.match(/当前 ([^·,，，]+)/) || ti.match(/^(.+?)\s*·/) || ti.match(/^([^·]+)/);
           if (m) setSessionModelLabel(m[1].trim());
         };
         pull();
