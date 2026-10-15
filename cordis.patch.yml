@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-model-fallback-queue
+      name: '@local/dsh-model-fallback-queue'
+      config: {}
