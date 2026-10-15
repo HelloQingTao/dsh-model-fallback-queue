@@ -469,7 +469,7 @@ window.__ModuleLoader__.load({
     // ---------- 装配 ----------
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'remote'],
       apply(ctx) {
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
         // v1 先走 cordis inspect/remote 通用通道；具体 RPC 方法由 host 侧 SettingsForms 提供。
