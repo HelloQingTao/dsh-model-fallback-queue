@@ -85,7 +85,7 @@ window.__ModuleLoader__.load({
 
     // ---------- 模型选择器（数据来自 remote.session.modelCatalog，同内置模型选择器） ----------
 
-    function ModelPicker({ onClose, onPick }) {
+    function ModelPicker({ onClose, onPick, existing = [] }) {
       const [groups, setGroups] = React.useState(null);
       const [err, setErr] = React.useState(null);
       const [openProvider, setOpenProvider] = React.useState(null);
@@ -254,6 +254,7 @@ window.__ModuleLoader__.load({
         await patch({ queue: q });
       };
 
+      const [confirmRemove, setConfirmRemove] = React.useState(null); // index awaiting confirm
       const remove = async (i) => {
         const q = cfg.queue.filter((_, k) => k !== i);
         await patch({ queue: q });
@@ -312,7 +313,13 @@ window.__ModuleLoader__.load({
                       : null,
                     h('button', { onClick: () => move(i, -1), disabled: i === 0, style: btnSmall }, '↑'),
                     h('button', { onClick: () => move(i, 1), disabled: i === cfg.queue.length - 1, style: btnSmall }, '↓'),
-                    h('button', { onClick: () => remove(i), style: btnSmall }, '移除'),
+                    confirmRemove === i
+                      ? h('span', { style: { display: 'flex', gap: 4, alignItems: 'center' } },
+                          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, '确认移除？'),
+                          h('button', { onClick: () => { setConfirmRemove(null); remove(i); }, style: { ...btnSmall, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, '移除'),
+                          h('button', { onClick: () => setConfirmRemove(null), style: btnSmall }, '取消'),
+                        )
+                      : h('button', { onClick: () => setConfirmRemove(i), style: btnSmall }, '移除'),
                   );
                 }),
           ),
@@ -367,6 +374,7 @@ window.__ModuleLoader__.load({
         pickerOpen
           ? h(ModelPicker, {
               onClose: () => setPickerOpen(false),
+              existing: cfg.queue.map((r) => `${r.provider}/${r.model}`),
               onPick: async (provider, model) => {
                 setPickerOpen(false);
                 await patch({ queue: [...cfg.queue, { provider, model }] });
