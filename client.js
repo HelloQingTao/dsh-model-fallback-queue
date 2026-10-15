@@ -377,6 +377,7 @@ window.__ModuleLoader__.load({
               existing: cfg.queue.map((r) => `${r.provider}/${r.model}`),
               onPick: async (provider, model) => {
                 setPickerOpen(false);
+                if (cfg.queue.some((r) => r.provider === provider && r.model === model)) return; // 防重复兜底
                 await patch({ queue: [...cfg.queue, { provider, model }] });
               },
             })
