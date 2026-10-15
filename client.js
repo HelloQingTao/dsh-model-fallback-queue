@@ -468,9 +468,57 @@ window.__ModuleLoader__.load({
 
     // ---------- 装配 ----------
 
+    // ---------- Typert Remote 契约（SRC fallback：host 侧 Service 无 strict schema，client 描述符走最小 strict codec） ----------
+
+    const jsonCodec = (sym) => ({ mode: 'strict', typeSymbol: sym, create: () => ({}) });
+
+    const TYPERT_REMOTE = {
+      package: '@local/dsh-model-fallback-queue',
+      descriptors: [
+        {
+          id: '@local/dsh-model-fallback-queue#dsh-model-fallback-queue/snapshot',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'snapshot',
+          invocation: { kind: 'direct' },
+          parameters: [],
+          result: { mode: 'src-json' },
+        },
+        {
+          id: '@local/dsh-model-fallback-queue#dsh-model-fallback-queue/probe',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'probe',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@local/dsh-model-fallback-queue#Index') }],
+          result: { mode: 'src-json' },
+        },
+        {
+          id: '@local/dsh-model-fallback-queue#dsh-model-fallback-queue/manualFailback',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'manualFailback',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@local/dsh-model-fallback-queue#Index') }],
+          result: { mode: 'src-json' },
+        },
+      ],
+    };
+
     return {
-      inject: ['slots', 'remote'],
-      apply(ctx) {
+      inject: ['slots', 'remote', 'remote.settings'],
+      async apply(ctx) {
+        // 挂载自己的 Remote namespace，然后在内层 ctx.inject 里拿 remote.dsh-model-fallback-queue face
+        const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
+        ctx.effect(() => () => { void disposeRemote(); }, 'fallback-queue remote mount');
+        await ctx.inject(
+          ['slots', 'remote', 'remote.settings', 'remote.dsh-model-fallback-queue'],
+          (rctx) => registerSlots(rctx),
+        );
+      },
+    };
+
+    function registerSlots(ctx) {
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
         // v1 先走 cordis inspect/remote 通用通道；具体 RPC 方法由 host 侧 SettingsForms 提供。
         const host = {
@@ -548,7 +596,6 @@ window.__ModuleLoader__.load({
             () => Chip({ host }),
           ),
         );
-      },
-    };
+    }
   },
 });
