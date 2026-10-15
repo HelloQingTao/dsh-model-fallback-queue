@@ -223,6 +223,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [snap, setSnap] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
+      const [confirmRemove, setConfirmRemove] = React.useState(null); // 移除确认中的行索引
 
       const refresh = React.useCallback(async () => {
         const s = await host.getSettings();
@@ -254,7 +255,6 @@ window.__ModuleLoader__.load({
         await patch({ queue: q });
       };
 
-      const [confirmRemove, setConfirmRemove] = React.useState(null); // index awaiting confirm
       const remove = async (i) => {
         const q = cfg.queue.filter((_, k) => k !== i);
         await patch({ queue: q });
