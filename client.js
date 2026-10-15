@@ -22,10 +22,10 @@ window.__ModuleLoader__.load({
 
     function Badge({ tone, children }) {
       const colors = {
-        ok: 'var(--dsw-alias-color-success, #3a9e5f)',
-        warn: 'var(--dsw-alias-color-warning, #c98a1b)',
-        error: 'var(--dsw-alias-color-danger, #c94141)',
-        muted: 'var(--dsw-alias-color-text-secondary, #888)',
+        ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
+        warn: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+        error: 'var(--dsw-alias-state-error-primary, #c94141)',
+        muted: 'var(--dsw-alias-label-secondary, #888)',
       };
       return h(
         'span',
@@ -63,8 +63,8 @@ window.__ModuleLoader__.load({
             border: 'none',
             cursor: 'pointer',
             background: checked
-              ? 'var(--dsw-alias-color-accent, #4f7cf7)'
-              : 'var(--dsw-alias-color-border, #ccc)',
+              ? 'var(--dsw-alias-brand-primary, #4f7cf7)'
+              : 'var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ccc))',
             transition: 'background .15s',
           },
         },
@@ -151,7 +151,7 @@ window.__ModuleLoader__.load({
           { style: { display: 'flex', alignItems: 'center', gap: 12 } },
           h('strong', null, '启用故障转移'),
           h(Switch, { checked: !!cfg.enabled, onChange: (v) => patch({ enabled: v }), label: '启用故障转移' }),
-          busy ? h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-color-text-secondary)' } }, '保存中…') : null,
+          busy ? h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '保存中…') : null,
         ),
         // 队列
         h(
@@ -162,7 +162,7 @@ window.__ModuleLoader__.load({
             'div',
             { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
             cfg.queue.length === 0
-              ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-color-text-secondary)' } }, '队列为空：添加 P2/P3… 作为 P1 的后备模型')
+              ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, '队列为空：添加 P2/P3… 作为 P1 的后备模型')
               : cfg.queue.map((r, i) => {
                   const entry = snap?.entries?.[i];
                   return h(
@@ -175,7 +175,7 @@ window.__ModuleLoader__.load({
                         gap: 8,
                         padding: '6px 10px',
                         borderRadius: 8,
-                        border: '1px solid var(--dsw-alias-color-border, #ddd)',
+                        border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
                       },
                     },
                     h('strong', { style: { width: 28 } }, `P${i + 1}`),
@@ -209,7 +209,7 @@ window.__ModuleLoader__.load({
                     gap: 8,
                     padding: '8px 10px',
                     borderRadius: 8,
-                    border: `1px solid ${cfg.failbackMode === value ? 'var(--dsw-alias-color-accent, #4f7cf7)' : 'var(--dsw-alias-color-border, #ddd)'}`,
+                    border: `1px solid ${cfg.failbackMode === value ? 'var(--dsw-alias-brand-primary, #4f7cf7)' : 'var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))'}`,
                     cursor: 'pointer',
                   },
                 },
@@ -223,7 +223,7 @@ window.__ModuleLoader__.load({
                   'span',
                   null,
                   h('div', { style: { fontSize: 13, fontWeight: 600 } }, title),
-                  h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-color-text-secondary)' } }, desc),
+                  h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, desc),
                 ),
               ),
             ),
@@ -233,7 +233,7 @@ window.__ModuleLoader__.load({
         snap?.lastSwitch
           ? h(
               'div',
-              { style: { fontSize: 12, color: 'var(--dsw-alias-color-text-secondary)' } },
+              { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
               `最近切换：P${snap.lastSwitch.from + 1} → P${snap.lastSwitch.to + 1}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
             )
           : null,
@@ -244,7 +244,7 @@ window.__ModuleLoader__.load({
       fontSize: 12,
       padding: '2px 8px',
       borderRadius: 6,
-      border: '1px solid var(--dsw-alias-color-border, #ddd)',
+      border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
       background: 'transparent',
       color: 'inherit',
       cursor: 'pointer',
@@ -309,10 +309,10 @@ window.__ModuleLoader__.load({
       }
 
       const toneColor = {
-        ok: 'var(--dsw-alias-color-success, #3a9e5f)',
-        warn: 'var(--dsw-alias-color-warning, #c98a1b)',
-        error: 'var(--dsw-alias-color-danger, #c94141)',
-        muted: 'var(--dsw-alias-color-text-secondary, #888)',
+        ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
+        warn: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+        error: 'var(--dsw-alias-state-error-primary, #c94141)',
+        muted: 'var(--dsw-alias-label-secondary, #888)',
       }[tone];
 
       return h(
@@ -329,8 +329,8 @@ window.__ModuleLoader__.load({
               width: 26,
               height: 26,
               borderRadius: 8,
-              border: '1px solid var(--dsw-alias-color-border, #ddd)',
-              background: 'var(--dsw-alias-color-surface, transparent)',
+              border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+              background: 'var(--dsw-alias-bg-base, transparent)',
               color: 'inherit',
               cursor: 'pointer',
               fontSize: 12,
@@ -352,7 +352,7 @@ window.__ModuleLoader__.load({
               height: 8,
               borderRadius: '50%',
               background: toneColor,
-              border: '1.5px solid var(--dsw-alias-color-surface, #fff)',
+              border: '1.5px solid var(--dsw-alias-bg-overlay, #fff)',
             },
           }),
         ),
@@ -366,8 +366,8 @@ window.__ModuleLoader__.load({
                   right: 0,
                   minWidth: 300,
                   borderRadius: 12,
-                  border: '1px solid var(--dsw-alias-color-border, #ddd)',
-                  background: 'var(--dsw-alias-color-surface, #fff)',
+                  border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+                  background: 'var(--dsw-alias-bg-overlay, #fff)',
                   boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
                   zIndex: 30,
                   overflow: 'hidden',
@@ -383,7 +383,7 @@ window.__ModuleLoader__.load({
                     padding: '10px 14px',
                     fontSize: 12,
                     fontWeight: 600,
-                    borderBottom: '1px solid var(--dsw-alias-color-border, #eee)',
+                    borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -399,7 +399,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
                 entries.length === 0
-                  ? h('div', { style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-color-text-secondary)' } }, '队列为空，到设置页添加后备模型')
+                  ? h('div', { style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '队列为空，到设置页添加后备模型')
                   : entries.map((e) => {
                       const isActive = e.index === active;
                       return h(
@@ -413,13 +413,13 @@ window.__ModuleLoader__.load({
                             padding: '7px 8px',
                             borderRadius: 8,
                             fontSize: 12,
-                            background: isActive ? 'var(--dsw-alias-color-accent, #4f7cf7)' + '14' : 'transparent',
+                            background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                           },
                         },
                         h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + 1}`),
                         h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
                         isActive
-                          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-color-accent, #4f7cf7)', fontWeight: 600 } }, '当前')
+                          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
                           : null,
                         h(Badge, { tone: STATE_TONE[e.state] || 'muted' }, STATE_TEXT[e.state] || e.state),
                       );
@@ -431,12 +431,12 @@ window.__ModuleLoader__.load({
                 {
                   style: {
                     padding: '8px 14px',
-                    borderTop: '1px solid var(--dsw-alias-color-border, #eee)',
+                    borderTop: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     fontSize: 11,
-                    color: 'var(--dsw-alias-color-text-secondary)',
+                    color: 'var(--dsw-alias-label-secondary)',
                   },
                 },
                 snap?.lastSwitch
@@ -451,7 +451,7 @@ window.__ModuleLoader__.load({
                           fontSize: 11,
                           padding: '3px 10px',
                           borderRadius: 6,
-                          border: '1px solid var(--dsw-alias-color-border, #ddd)',
+                          border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
                           background: 'transparent',
                           color: 'inherit',
                           cursor: 'pointer',
@@ -476,9 +476,12 @@ window.__ModuleLoader__.load({
         const host = {
           async getSettings() {
             try {
-              // settings.describe() 返回 SettingsDescriptor[]（按 entry id 平铺），不是 {namespaces}
+              // ctx.remote.settings.describe() 返回 {ok, value} 信封（原生 UI 同款处理）；
+              // value = {writable, hasDocument, namespaces:[{ns, value, revision}...]}
               const doc = await ctx.remote?.settings?.describe?.();
-              const list = Array.isArray(doc) ? doc : doc?.namespaces;
+              if (!doc?.ok) return null;
+              const v = doc.value;
+              const list = Array.isArray(v) ? v : v?.namespaces;
               const ns = (list || []).find((n) => n.ns === 'dsh-model-fallback-queue');
               return ns?.value ?? null;
             } catch (e) {
@@ -489,13 +492,16 @@ window.__ModuleLoader__.load({
           async updateSettings(patch) {
             try {
               const doc = await ctx.remote?.settings?.describe?.();
-              const list = Array.isArray(doc) ? doc : doc?.namespaces;
+              const v = doc?.ok ? doc.value : doc;
+              const list = Array.isArray(v) ? v : v?.namespaces;
               const ns = (list || []).find((n) => n.ns === 'dsh-model-fallback-queue');
-              await ctx.remote?.settings?.update?.(
+              // update 返回 {ok, value} 信封；失败时 warn
+              const r = await ctx.remote?.settings?.update?.(
                 'dsh-model-fallback-queue',
                 patch,
                 ns?.revision,
               );
+              if (r && r.ok === false) console.warn('[fallback-queue] update rejected', r.error?.message);
             } catch (e) {
               console.warn('[fallback-queue] update failed', e);
             }
