@@ -289,7 +289,7 @@ window.__ModuleLoader__.load({
             'div',
             { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
             cfg.queue.length === 0
-              ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, '队列为空：添加 P2/P3… 作为 P1 的后备模型')
+              ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, '队列为空：添加 P2/P3… 作为 P1（当前会话模型）的后备')
               : cfg.queue.map((r, i) => {
                   const entry = snap?.entries?.[i];
                   return h(
@@ -305,7 +305,7 @@ window.__ModuleLoader__.load({
                         border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
                       },
                     },
-                    h('strong', { style: { width: 28 } }, `P${i + 1}`),
+                    h('strong', { style: { width: 28 } }, cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`),
                     h('span', { style: { flex: 1, fontSize: 13 } }, `${r.provider} / ${r.model}`),
                     entry
                       ? h(Badge, { tone: STATE_TONE[entry.state] || 'muted' }, `${STATE_TEXT[entry.state] || entry.state}${entry.failures ? ` · 失败${entry.failures}` : ''}`)

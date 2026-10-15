@@ -133,7 +133,9 @@ function createRouter(config, log) {
     onFailedAttempt(provider, model, code) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return false;
-      const idx = queue.findIndex((r) => r.provider === provider && r.model === model);
+      let idx = queue.findIndex((r) => r.provider === provider && r.model === model);
+      // P1 动态跟随：失败路由=当前会话模型且不等于队列静态 P1 时，把失败记到 P1（idx 0）
+      if (idx === -1 && config.p1Follow) idx = 0;
       if (idx === -1) return false; // 不是队列里的路由，不接管
       recordFailure(queue[idx], code);
       const nextIdx = this.resolveIndex();
@@ -280,6 +282,8 @@ export function apply(ctx) {
         const cfg = await next();
         const idx = router.resolveIndex();
         if (idx === -1) return cfg;
+        // P1（idx 0）动态跟随当前会话模型：不覆盖，放行原配置
+        if (idx === 0 && config.p1Follow) return cfg;
         const route = config.queue[idx];
         if (!route) return cfg;
         return { ...cfg, provider: route.provider, model: route.model };
