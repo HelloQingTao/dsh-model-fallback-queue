@@ -1,0 +1,49 @@
+# 打 v* tag 即发版：OIDC trusted publishing，仓库里不存任何 npm 凭据。
+# 前置（每个包只配一次）：npmjs.com → 包 → Access → Trusted Publishers 添加
+#   Organization/user = HelloQingTao，Repository = dsh-model-fallback-queue，
+#   Workflow filename = release.yml，Environment 留空，并勾上 Allow npm publish。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # 关键：OIDC token 换发布凭据
+
+jobs:
+  release:
+    runs-on: ubuntu-latest # 必须 GitHub-hosted runner，self-hosted 不支持 OIDC
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: The tag and package.json must agree
+        if: github.event_name == 'push'
+        run: |
+          declared="v$(node -p "require('./package.json').version")"
+          if [ "$declared" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json ($declared)"
+            exit 1
+          fi
+      - name: Pack preview
+        run: npm pack --dry-run
+      - name: Is this version already on npm?
+        id: exists
+        run: |
+          pkg="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$pkg@$ver is already on npm — skipping publish"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish
+        if: steps.exists.outputs.published == 'false'
+        run: npm publish # 不要加 --provenance，trusted publishing 会自动生成

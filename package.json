@@ -16,6 +16,7 @@
     "README.md",
     "README.en.md",
     "LICENSE",
+    "assets",
     "docs/design-plan.md"
   ],
   "license": "MIT",
@@ -56,6 +57,9 @@
       "platform": "web",
       "immediately": true,
       "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    },
+    "compatibility": {
+      "dshReleases": ["0.2.0-rc.2"]
     }
   }
 }

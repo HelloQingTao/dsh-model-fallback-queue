@@ -1,111 +1,187 @@
 # dsh-model-fallback-queue
 
-> DeepSeek Harness（dsh）插件：当前模型限额、限流或不可用时，自动切换到队列里的下一个模型，把会话接着跑完。
-> 队列和开关都在设置页里点，不需要命令行。
+<p align="center">
+  <a href="https://www.npmjs.com/package/dsh-model-fallback-queue"><img src="https://img.shields.io/npm/v/dsh-model-fallback-queue?style=flat-square&label=npm&color=cb3837" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/dsh-model-fallback-queue"><img src="https://img.shields.io/npm/d18m/dsh-model-fallback-queue?style=flat-square&label=downloads&color=cb3837" alt="npm downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/HelloQingTao/dsh-model-fallback-queue?style=flat-square" alt="MIT license"></a>
+  <a href="https://github.com/HelloQingTao/dsh-model-fallback-queue/stargazers"><img src="https://img.shields.io/github/stars/HelloQingTao/dsh-model-fallback-queue?style=flat-square" alt="GitHub stars"></a>
+  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://awesome.re/badge.svg" alt="Awesome"></a>
+</p>
 
-- npm：`dsh-model-fallback-queue`
-- 宿主插件 + Web 客户端插件（设置页 + 输入框状态芯片）
-- 零依赖、不写任何文件、不改 dsh 核心
+**English** | [中文](#中文)
 
-## 解决什么问题
+---
 
-会话用某个模型时，如果它 5 小时/周/月限额用尽（`QUOTA` / `ACCOUNT_QUOTA`）、被限流（`RATE_LIMIT`）或凭据失效（`AUTH` / `INVALID_CREDENTIAL`），请求直接失败，会话卡住，只能手动换模型再让会话继续。
+## 中文
 
-本插件把「换模型」这件事自动化：请求失败 → 熔断当前路由 → 同一步用队列里下一个可用模型重试 → 成功后稳定留在新路由上。
+当前模型限额、限流或不可用时，自动切到队列里的下一个模型，把会话接着跑完。开关、队列、P1 恢复策略都在设置页里点，不需要命令行。
 
-## 功能
+### 功能
 
-- **请求级自动切换**：命中熔断码立刻熔断当前路由；非即时码连续失败 2 次也熔断（软熔断）。
-- **队列 P1 → Pn**：P1 默认跟随当前会话模型（你在模型选择器里换模型，P1 跟着换），队列里添加的是后备 P2、P3…
+- **请求级自动切换**：命中熔断码立刻熔断当前路由；非即时错误连续失败 2 次也熔断。
+- **队列 P1 → Pn**：P1 默认跟随当前会话模型（你在模型选择器里换，P1 跟着换），队列里加的是后备 P2、P3…
 - **三档 P1 恢复策略**：粘滞（默认）/ 探测回切 / 手动回切。
-- **输入框状态芯片**：显示当前生效路由与健康状态；全熔断时显示红色「全部熔断」徽章；点开是队列面板，可以「切回 P1」或跳到设置页。
-- **全熔断降级放行**：所有路由都不可用时按原配置放行，插件绝不拦截请求。
-- **不抢 dsh-llm-retry 的活**：非致命错误一律 `next()` 让路，同路由重试仍由核心的重试插件负责。
+- **输入框状态芯片**：显示当前生效路由与健康状态，全熔断时是红色「全部熔断」徽章；展开是队列面板，可「切回 P1」或跳到设置页。
+- **全熔断降级放行**：所有路由都不可用时按原配置放行，插件不拦截请求。
+- **不抢同路由重试的活**：非致命错误一律放行，退避重试仍由 dsh-llm-retry 负责。
 
-## 安装
+### 效果图
+
+设置页（开关 / 队列 / P1 恢复策略）：
+
+![故障转移设置页：启用开关、P1 → Pn 队列（优先级、路由名、健康徽章、上移/下移/移除）、+ 添加模型、P1 恢复策略三档单选](assets/settings-page.png)
+
+输入框右侧的芯片与展开面板：
+
+![输入框右侧的故障转移芯片与展开面板：P1 当前会话模型、P2/P3/P4 后备路由与健康状态、最近切换记录](assets/chip-panel.png)
+
+### 安装
 
 ```sh
 dsh plugin --profile web add dsh-model-fallback-queue
 ```
 
-装完重启 dsh（或刷新 Web GUI）即可，bundle 会随插件自带的 `cordis.patch.yml` 自动注册。
+装完重启 dsh（或刷新 Web GUI），bundle 会随包里的 `cordis.patch.yml` 自动注册。
 
-## 用法（全程图形界面）
+### 用法
 
 1. **设置 → 故障转移** → 打开「启用故障转移」。
-2. **+ 添加模型**：从模型目录里挑后备模型（P2、P3…），↑ / ↓ 调整顺序，「移除」删掉。
-3. **P1 恢复策略**：按需选粘滞 / 探测回切 / 手动回切。
-4. 回到会话：输入框右侧出现状态芯片，显示当前生效的 P1 路由。
+2. **+ 添加模型**：挑后备模型（P2、P3…），↑ / ↓ 调顺序，「移除」删掉。
+3. **P1 恢复策略**：选粘滞 / 探测回切 / 手动回切。
+4. 回到会话：输入框右侧出现芯片，显示当前生效的 P1 路由。
 
 发生切换时，会话里会出现核心自带的「模型已切换」通知，芯片同步切到新路由。
 
-### 芯片状态
+**芯片状态**
 
 | 显示 | 含义 |
 | --- | --- |
 | `P1` + 绿点 | 正常走 P1 |
-| `P2`（黄点） | 已切换到 P2；黄点表示半开探测中 |
+| `P2`（黄点） | 已切到 P2；黄点表示半开探测中 |
 | `P!` + 红点 | 队列全部熔断，已降级放行原配置 |
 | `P`（灰点） | 插件未启用 |
 
-面板行为：每行显示优先级、provider/model、健康徽章（🟢 正常 / 🟡 探测中 / 🔴 熔断，带连续失败数）；当前生效行有「当前」标记；底部是最近一次切换记录（`P1 → P2（QUOTA）`）、「切回 P1」按钮（已切走时出现）和「设置…」入口。
-
-### 恢复策略三档
+**恢复策略三档**
 
 | 档位 | 行为 |
 | --- | --- |
-| **粘滞**（默认，推荐） | 切到 P2 后只要 P2 可用就一直用，P1 恢复了也不切回；P2 也挂时按「邻近可用」往后找，绕回 P1 是最后手段。零抖动，缓存最稳。 |
-| **探测回切** | P1 冷却到期后，由下一个真实请求探测回 P1；成功留下，失败回 P2（防抖 5 分钟，不额外发探测流量）。 |
-| **手动回切** | 切走后永不自动回 P1，用芯片面板里的「切回 P1」手动恢复。 |
+| **粘滞**（默认） | 切到 P2 后只要 P2 可用就一直用，P1 恢复也不切回；P2 也挂时按邻近可用往后找，绕回 P1 是最后手段。 |
+| **探测回切** | P1 冷却到期后，由下一个真实请求探测回 P1；成功留下，失败回 P2（防抖 5 分钟，不发额外探测流量）。 |
+| **手动回切** | 切走后不自动回 P1，用芯片面板里的「切回 P1」恢复。 |
 
-## 配置项
+### 配置项
 
 | 字段 | 默认值 | 说明 | 设置页可改 |
 | --- | --- | --- | --- |
 | `enabled` | `false` | 总开关 | ✅ |
 | `queue` | `[]` | 后备队列，数组顺序即优先级 | ✅ |
-| `failbackMode` | `sticky` | P1 恢复策略：`sticky` / `probe` / `manual` | ✅ |
+| `failbackMode` | `sticky` | `sticky` / `probe` / `manual` | ✅ |
 | `p1Follow` | `true` | P1 跟随当前会话模型 | — |
-| `immediateCodes` | `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT`, `AUTH`, `INVALID_CREDENTIAL`, `NO_ADAPTER` | 命中即熔断的错误码 | — |
+| `immediateCodes` | `QUOTA`、`ACCOUNT_QUOTA`、`RATE_LIMIT`、`AUTH`、`INVALID_CREDENTIAL`、`NO_ADAPTER` | 命中即熔断的错误码 | — |
 | `failureThreshold` | `2` | 非即时码的连续失败阈值 | — |
-| `cooldownMs` | `60000` | 熔断冷却毫秒数 | — |
-| `failbackDelayMs` | `300000` | 探测回切防抖毫秒数 | — |
+| `cooldownMs` | `60000` | 熔断冷却毫秒 | — |
+| `failbackDelayMs` | `300000` | 探测回切防抖毫秒 | — |
 
-> 带 — 的高级旋钮当前通过 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里本插件那一行的 `config` 配置（默认值适用于绝大多数场景）。日常使用的开关、队列、恢复策略都在设置页。
+日常用的开关、队列、恢复策略都在设置页；标「—」的高级旋钮默认值适用于绝大多数场景，需要时写进 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里本插件那一行的 `config`。
 
-## 工作原理
+### 兼容与注意
 
-宿主侧三个扩展点（全部 try/catch 兜底，任何异常都不拦截请求）：
-
-- `agent/request`（waterfall）：生效路由不是 P1 时，返回 `{...cfg, provider, model}` 覆盖本次请求；
-- `agent/request-error`（prepend）：判定熔断码 → 熔断当前路由 → 返回 `{ kind: 'retry' }` 让 agent-loop 换路由重试同一步；非致命码 `next()` 让路；
-- `agent/assistant-stream`：`end` 帧即认为该路由走通，复位熔断计数。
-
-熔断器为三态（closed / half_open / open），纯内存，进程重启自动归零。运行态经 typert Remote 暴露 `snapshot` / `probe` / `manualFailback` 给 Web 客户端。
-
-## 兼容与注意
-
-- 与 `dsh-client-auto-continue` 天然兼容：自动续发走的是同一条请求瀑布，一样享受队列切换。
-- 与 `dsh-llm-retry` 分层：它管同路由退避重试，本插件管跨路由切换，不互相抢。
-- 熔断态不持久化，重启即全部恢复为正常。
+- 实测 dsh `0.2.0-rc.2`（宿主 + Web GUI）。
+- 与 `dsh-client-auto-continue` 天然兼容：自动续发走同一条请求瀑布，一样享受队列切换。
+- 与 `dsh-llm-retry` 分层：它管同路由退避重试，本插件管跨路由切换。
+- 号池类 provider（如 workbuddy-xdpool）单号限流由号池内部换号，整池到顶才轮到本插件跨模型切换。
+- 熔断态是内存态，进程重启归零；不写文件、不动 session。
 - 队列为空或只有一项时不会发生切换。
-- 如果同时装了别的故障转移插件，建议只留一个，避免两个插件争抢 `agent/request-error`。
+- 不要和其他故障转移插件同时启用，两个插件争抢同一错误事件没有意义。
 
-## 开发
+### 许可证
+
+[MIT](LICENSE)
+
+---
+
+## English
+
+When your current model hits its quota, gets rate-limited or becomes unavailable, requests automatically fail over to the next model in your queue and the session keeps going. The switch, the queue and the P1 recovery mode are all configured from the Settings UI — no CLI needed.
+
+### Features
+
+- **Per-request failover.** Known failure codes trip the current route immediately; two consecutive failures of any other kind also trip it.
+- **Queue P1 → Pn.** P1 follows the current session model by default (switch models in the picker and P1 follows); entries you add are the backups P2, P3…
+- **Three P1 recovery modes.** Sticky (default), probe-back, manual.
+- **Input-box status chip.** Shows the active route and its health, a red “all tripped” badge when nothing is left; expand it for the queue panel with a “Back to P1” action and a settings shortcut.
+- **Degrades safely.** When every route is tripped the original config is passed through untouched — the plugin never blocks a request.
+- **Does not fight same-route retries.** Non-fatal errors are always passed through; backoff retries stay with dsh-llm-retry.
+
+### Screenshots
+
+Settings page (switch / queue / P1 recovery mode):
+
+![Failover settings page: enable switch, P1 → Pn queue (priority, route, health badge, move up/down, remove), + Add model, and the three P1 recovery modes](assets/settings-page.png)
+
+The chip next to the input box and its expanded panel:
+
+![The chip next to the input box and its expanded panel: P1 is the current session model, P2/P3/P4 are backups with health badges, plus the last-switch line](assets/chip-panel.png)
+
+### Install
 
 ```sh
-git clone https://github.com/HelloQingTao/dsh-model-fallback-queue.git
-cd dsh-model-fallback-queue
+dsh plugin --profile web add dsh-model-fallback-queue
 ```
 
-在 profile 里以 `link:` 方式引用本目录即可热改：
+Restart dsh (or reload the Web GUI); the bundle registers itself through the `cordis.patch.yml` shipped in the package.
 
-```json
-"dependencies": { "dsh-model-fallback-queue": "link:/path/to/dsh-model-fallback-queue" }
-```
+### Usage
 
-设计文档见 [docs/design-plan.md](docs/design-plan.md)。
+1. **Settings → Failover** → turn on “Enable failover”.
+2. **+ Add model** to add backups (P2, P3…); reorder with ↑ / ↓, remove with the remove action.
+3. Pick a P1 recovery mode.
+4. Back in the conversation, the chip next to the input box shows the active P1 route.
 
-## License
+On every switch the core “model switched” notice appears in the session and the chip follows.
+
+**Chip states**
+
+| Chip | Meaning |
+| --- | --- |
+| `P1` green dot | Running on P1 |
+| `P2` amber dot | Switched to P2; amber means a half-open probe is in flight |
+| `P!` red dot | Every route tripped — original config passed through |
+| `P` grey dot | Plugin disabled |
+
+**Recovery modes**
+
+| Mode | Behaviour |
+| --- | --- |
+| **Sticky** (default) | Once on P2 it stays there while P2 works, even after P1 recovers; if P2 also fails it walks forward and only wraps back to P1 as a last resort. |
+| **Probe back** | After P1's cooldown expires the next real request probes P1; success keeps it, failure returns to P2 (5-minute debounce, no extra probe traffic). |
+| **Manual** | Never returns to P1 automatically — use “Back to P1” in the chip panel. |
+
+### Configuration
+
+| Field | Default | Description | In Settings UI |
+| --- | --- | --- | --- |
+| `enabled` | `false` | Master switch | ✅ |
+| `queue` | `[]` | Backups; array order = priority | ✅ |
+| `failbackMode` | `sticky` | `sticky` / `probe` / `manual` | ✅ |
+| `p1Follow` | `true` | P1 follows the current session model | — |
+| `immediateCodes` | `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT`, `AUTH`, `INVALID_CREDENTIAL`, `NO_ADAPTER` | Codes that trip a route immediately | — |
+| `failureThreshold` | `2` | Consecutive failures for a soft trip | — |
+| `cooldownMs` | `60000` | Circuit cooldown in ms | — |
+| `failbackDelayMs` | `300000` | Probe-back debounce in ms | — |
+
+The everyday switch, queue and recovery mode live in the Settings UI; the advanced knobs marked “—” keep sensible defaults and can be set in the plugin row's `config` inside `~/.dsh/profiles/<profile>/cordis.patch.yml`.
+
+### Compatibility & notes
+
+- Tested with dsh `0.2.0-rc.2` (host + Web GUI).
+- Works alongside `dsh-client-auto-continue`: auto-continue rides the same request waterfall, so it benefits from failover too.
+- Layered with `dsh-llm-retry`: it handles same-route backoff, this plugin handles cross-route failover.
+- For pool-style providers (e.g. workbuddy-xdpool) a single account's rate limit is handled inside the pool; this plugin only switches models once the whole pool is exhausted.
+- Breaker state is in memory and resets on restart; the plugin writes no files and never touches the session.
+- No switching happens with an empty or single-entry queue.
+- Do not run another failover plugin at the same time — two plugins competing for the same error event is not useful.
+
+### License
 
 [MIT](LICENSE)
