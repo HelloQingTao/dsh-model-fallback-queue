@@ -3,7 +3,7 @@
 > DeepSeek Harness（dsh）插件：当前模型限额、限流或不可用时，自动切换到队列里的下一个模型，把会话接着跑完。
 > 队列和开关都在设置页里点，不需要命令行。
 
-- npm：`@helloqingtao/dsh-model-fallback-queue`
+- npm：`dsh-model-fallback-queue`
 - 宿主插件 + Web 客户端插件（设置页 + 输入框状态芯片）
 - 零依赖、不写任何文件、不改 dsh 核心
 
@@ -25,7 +25,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add @helloqingtao/dsh-model-fallback-queue
+dsh plugin --profile web add dsh-model-fallback-queue
 ```
 
 装完重启 dsh（或刷新 Web GUI）即可，bundle 会随插件自带的 `cordis.patch.yml` 自动注册。
@@ -101,7 +101,7 @@ cd dsh-model-fallback-queue
 在 profile 里以 `link:` 方式引用本目录即可热改：
 
 ```json
-"dependencies": { "@helloqingtao/dsh-model-fallback-queue": "link:/path/to/dsh-model-fallback-queue" }
+"dependencies": { "dsh-model-fallback-queue": "link:/path/to/dsh-model-fallback-queue" }
 ```
 
 设计文档见 [docs/design-plan.md](docs/design-plan.md)。

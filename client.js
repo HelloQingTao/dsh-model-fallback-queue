@@ -9,7 +9,7 @@
  * 组件内样式用 React style/style 标签，卸载即清理。
  */
 window.__ModuleLoader__.load({
-  id: '@helloqingtao/dsh-model-fallback-queue',
+  id: 'dsh-model-fallback-queue',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -699,10 +699,10 @@ window.__ModuleLoader__.load({
     const jsonCodec = (sym) => ({ mode: 'strict', typeSymbol: sym, create: () => ({}) });
 
     const TYPERT_REMOTE = {
-      package: '@helloqingtao/dsh-model-fallback-queue',
+      package: 'dsh-model-fallback-queue',
       descriptors: [
         {
-          id: '@helloqingtao/dsh-model-fallback-queue#dsh-model-fallback-queue/snapshot',
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/snapshot',
           service: 'FallbackQueueService',
           namespace: 'dsh-model-fallback-queue',
           method: 'snapshot',
@@ -711,21 +711,21 @@ window.__ModuleLoader__.load({
           result: { mode: 'src-json' },
         },
         {
-          id: '@helloqingtao/dsh-model-fallback-queue#dsh-model-fallback-queue/probe',
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/probe',
           service: 'FallbackQueueService',
           namespace: 'dsh-model-fallback-queue',
           method: 'probe',
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@helloqingtao/dsh-model-fallback-queue#Index') }],
+          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Index') }],
           result: { mode: 'src-json' },
         },
         {
-          id: '@helloqingtao/dsh-model-fallback-queue#dsh-model-fallback-queue/manualFailback',
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/manualFailback',
           service: 'FallbackQueueService',
           namespace: 'dsh-model-fallback-queue',
           method: 'manualFailback',
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@helloqingtao/dsh-model-fallback-queue#Index') }],
+          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Index') }],
           result: { mode: 'src-json' },
         },
       ],

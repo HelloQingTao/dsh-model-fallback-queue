@@ -3,7 +3,7 @@
 > A [DeepSeek Harness](https://dsh-plugin.org) (dsh) plugin: when your current model hits its quota, gets rate-limited or becomes unavailable, requests automatically fail over to the next model in your queue — the session keeps going.
 > Everything is configured from the Settings UI, no CLI needed.
 
-- npm: `@helloqingtao/dsh-model-fallback-queue`
+- npm: `dsh-model-fallback-queue`
 - Host plugin + Web client plugin (settings page + an input-box status chip)
 - Zero dependencies, writes no files, patches nothing in dsh core
 
@@ -25,7 +25,7 @@ This plugin automates that switch: request fails → the current route is trippe
 ## Install
 
 ```sh
-dsh plugin --profile web add @helloqingtao/dsh-model-fallback-queue
+dsh plugin --profile web add dsh-model-fallback-queue
 ```
 
 Restart dsh (or reload the Web GUI). The bundle registers itself through the `cordis.patch.yml` shipped with the package.
@@ -101,7 +101,7 @@ cd dsh-model-fallback-queue
 Reference it from a profile with a `link:` dependency to iterate live:
 
 ```json
-"dependencies": { "@helloqingtao/dsh-model-fallback-queue": "link:/path/to/dsh-model-fallback-queue" }
+"dependencies": { "dsh-model-fallback-queue": "link:/path/to/dsh-model-fallback-queue" }
 ```
 
 Design notes: [docs/design-plan.md](docs/design-plan.md) (Chinese).
