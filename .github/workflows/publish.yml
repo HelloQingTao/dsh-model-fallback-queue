@@ -1,0 +1,46 @@
+# 推 v* 标签即发布到 npm；也可以在 Actions 页手动触发（手动触发只跑校验，不发布会更安全）。
+# 需要仓库 secret：NPM_TOKEN = npm Automation 类型 token（CI 免 2FA）。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # provenance 签名需要 OIDC
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Show toolchain
+        run: |
+          node --version
+          npm --version
+      - name: Verify the tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json=$PKG_VERSION  tag=$TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+      - name: Pack preview
+        run: npm pack --dry-run
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -165,12 +165,15 @@ function createRouter(config, log) {
   };
 }
 
-// typert-protocol 只存在于 dsh 主包 node_modules，profile 链接解析不到（loader 无全局别名），
-// 用绝对路径 import 直达主包内副本（该副本自身依赖可正常解析）。
-import { TypertRemoteService } from '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-protocol/lib/index.js';
-// schemastery：profile 顶层可用但插件目录向上解析不到（同 typert-protocol），走绝对路径；
-// Config 必须是它（toJSON 信封供 dsh-settings 派生 settings namespace，~standard 供 cordis 校验）
-import s from '/Users/hellocta/.dsh/profiles/web/node_modules/@deepseek-ai/schemastery/lib/index.mjs';
+// 依赖写法：必须用裸包名 + package.json 声明 peerDependencies。
+// dsh 启动时会给「profile 内的包」和「link 到工作区的包」装一层运行时解析拦截
+// （dsh-app-boot 的 ResolutionRouter）：祖先 node_modules 里声明了该 peer 名字时，
+// 请求会被路由到安装域（dsh 主包 node_modules）里的同一份副本。
+// 因此这里既不需要绝对路径，也能保证与宿主拿到同一个模块实例（类标记/符号一致）。
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
+// schemastery：Config 必须是它（toJSON 信封供 dsh-settings 派生 settings namespace，
+// ~standard 供 cordis 校验），同样走 peerDependencies 解析。
+import s from '@deepseek-ai/schemastery';
 
 const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-methods';
 

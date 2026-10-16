@@ -9,7 +9,7 @@
  * 组件内样式用 React style/style 标签，卸载即清理。
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-model-fallback-queue',
+  id: '@helloqingtao/dsh-model-fallback-queue',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -503,6 +503,14 @@ window.__ModuleLoader__.load({
         muted: 'var(--dsw-alias-label-secondary, #888)',
       }[tone];
 
+      // 手动回切：把生效路由拉回 P1（p1Follow 下 = 当前会话模型）。
+      // 「手动回切」模式下这是唯一的回去方式；其它模式也可用它提前结束粘滞。
+      const failback = async () => {
+        await host.manualFailback(0);
+        const st = await host.getRuntimeSnapshot();
+        if (st) setSnap(st);
+      };
+
       return h(
         'div',
         { ref: rootRef, style: { position: 'relative', display: 'inline-flex' } },
@@ -637,24 +645,47 @@ window.__ModuleLoader__.load({
                 snap?.lastSwitch
                   ? `最近切换 P${snap.lastSwitch.from + ((snap.p1Follow ?? true) ? 2 : 1)} → P${snap.lastSwitch.to + ((snap.p1Follow ?? true) ? 2 : 1)}`
                   : '无切换记录',
-                onOpenSettings
-                  ? h(
-                      'button',
-                      {
-                        onClick: onOpenSettings,
-                        style: {
-                          fontSize: 11,
-                          padding: '3px 10px',
-                          borderRadius: 6,
-                          border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
-                          background: 'transparent',
-                          color: 'inherit',
-                          cursor: 'pointer',
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                  enabled && active !== 0
+                    ? h(
+                        'button',
+                        {
+                          onClick: failback,
+                          title: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
+                          style: {
+                            fontSize: 11,
+                            padding: '3px 10px',
+                            borderRadius: 6,
+                            border: '1px solid var(--dsw-alias-brand-primary, #4f7cf7)',
+                            background: 'transparent',
+                            color: 'var(--dsw-alias-brand-primary, #4f7cf7)',
+                            cursor: 'pointer',
+                          },
                         },
-                      },
-                      '设置…',
-                    )
-                  : null,
+                        '切回 P1',
+                      )
+                    : null,
+                  onOpenSettings
+                    ? h(
+                        'button',
+                        {
+                          onClick: onOpenSettings,
+                          style: {
+                            fontSize: 11,
+                            padding: '3px 10px',
+                            borderRadius: 6,
+                            border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+                            background: 'transparent',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                          },
+                        },
+                        '设置…',
+                      )
+                    : null,
+                ),
               ),
             )
           : null,
@@ -668,10 +699,10 @@ window.__ModuleLoader__.load({
     const jsonCodec = (sym) => ({ mode: 'strict', typeSymbol: sym, create: () => ({}) });
 
     const TYPERT_REMOTE = {
-      package: '@local/dsh-model-fallback-queue',
+      package: '@helloqingtao/dsh-model-fallback-queue',
       descriptors: [
         {
-          id: '@local/dsh-model-fallback-queue#dsh-model-fallback-queue/snapshot',
+          id: '@helloqingtao/dsh-model-fallback-queue#dsh-model-fallback-queue/snapshot',
           service: 'FallbackQueueService',
           namespace: 'dsh-model-fallback-queue',
           method: 'snapshot',
@@ -680,21 +711,21 @@ window.__ModuleLoader__.load({
           result: { mode: 'src-json' },
         },
         {
-          id: '@local/dsh-model-fallback-queue#dsh-model-fallback-queue/probe',
+          id: '@helloqingtao/dsh-model-fallback-queue#dsh-model-fallback-queue/probe',
           service: 'FallbackQueueService',
           namespace: 'dsh-model-fallback-queue',
           method: 'probe',
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@local/dsh-model-fallback-queue#Index') }],
+          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@helloqingtao/dsh-model-fallback-queue#Index') }],
           result: { mode: 'src-json' },
         },
         {
-          id: '@local/dsh-model-fallback-queue#dsh-model-fallback-queue/manualFailback',
+          id: '@helloqingtao/dsh-model-fallback-queue#dsh-model-fallback-queue/manualFailback',
           service: 'FallbackQueueService',
           namespace: 'dsh-model-fallback-queue',
           method: 'manualFailback',
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@local/dsh-model-fallback-queue#Index') }],
+          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('@helloqingtao/dsh-model-fallback-queue#Index') }],
           result: { mode: 'src-json' },
         },
       ],

@@ -1,9 +1,55 @@
 {
-  "name": "@local/dsh-model-fallback-queue",
+  "name": "@helloqingtao/dsh-model-fallback-queue",
   "version": "0.1.0",
-  "private": true,
+  "description": "模型故障转移队列：P1 限额/限流/不可用时自动切到队列下一个模型继续，全部图形界面配置 | Model fallback queue for DeepSeek Harness: auto-switch to the next model when the current one hits quota or rate limits",
   "type": "module",
-  "exports": { ".": "./index.js", "./client": "./client.js" },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "docs/design-plan.md"
+  ],
+  "license": "MIT",
+  "author": "HelloQingTao",
+  "homepage": "https://github.com/HelloQingTao/dsh-model-fallback-queue#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HelloQingTao/dsh-model-fallback-queue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HelloQingTao/dsh-model-fallback-queue/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "model-failover",
+    "failover",
+    "fallback",
+    "circuit-breaker",
+    "quota",
+    "rate-limit",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-alpha.2 || 0.2.1-alpha.4",
+    "@deepseek-ai/schemastery": "~3.18.4 || ~3.18.5-alpha.1"
+  },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
