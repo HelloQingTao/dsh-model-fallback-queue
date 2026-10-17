@@ -90,7 +90,8 @@ dsh plugin --profile web add dsh-model-fallback-queue
 
 ### 兼容与注意
 
-- 实测 dsh `0.2.0-rc.2`（宿主 + Web GUI）。
+- 实测 dsh `0.2.0-rc.2`、`0.2.1-rc.2`（宿主 + Web GUI）。
+- 兼容范围以 `package.json` 的 `engines.dsh` 为准（当前 `>=0.2.0-rc.2 <0.3.0`）。
 - 与 `dsh-client-auto-continue` 天然兼容：自动续发走同一条请求瀑布，一样享受队列切换。
 - 与 `dsh-llm-retry` 分层：它管同路由退避重试，本插件管跨路由切换。
 - 号池类 provider（如 workbuddy-xdpool）单号限流由号池内部换号，整池到顶才轮到本插件跨模型切换。
@@ -182,7 +183,8 @@ That file is plugin-private data and is **outside the Settings UI's config expor
 
 ### Compatibility & notes
 
-- Tested with dsh `0.2.0-rc.2` (host + Web GUI).
+- Tested with dsh `0.2.0-rc.2` and `0.2.1-rc.2` (host + Web GUI).
+- The supported range is declared by `engines.dsh` in `package.json` (currently `>=0.2.0-rc.2 <0.3.0`).
 - Works alongside `dsh-client-auto-continue`: auto-continue rides the same request waterfall, so it benefits from failover too.
 - Layered with `dsh-llm-retry`: it handles same-route backoff, this plugin handles cross-route failover.
 - For pool-style providers (e.g. workbuddy-xdpool) a single account's rate limit is handled inside the pool; this plugin only switches models once the whole pool is exhausted.

@@ -809,6 +809,13 @@ window.__ModuleLoader__.load({
       },
     };
 
+    // typert face 的返回值可能是 {ok,value} 信封，也可能是裸值（取决于 result codec）。
+    // 统一拆一次：成功取 value，失败/异常取 null。
+    function unwrapEnvelope(r) {
+      if (r && typeof r === 'object' && 'ok' in r) return r.ok ? (r.value ?? null) : null;
+      return r ?? null;
+    }
+
     function registerSlots(ctx, rpcFace) {
         // 健康圆点动画样式（幂等注入一次）
         if (!document.getElementById('fq-dot-style')) {
@@ -896,20 +903,25 @@ window.__ModuleLoader__.load({
               return null;
             }
           },
+          // typert face 返回值可能是 {ok,value} 信封（失败时 {ok:false,error}），也可能
+          // 是裸值。统一在这里拆一次，调用方看到的永远是裸值/null，避免把 {ok:false}
+          // 当成真值继续用（probe/manualFailback 以前直接透传信封，UI 判断会失真）。
           async probe(index) {
             try {
-              return await rpcFace?.probe?.(index) ?? { ok: false };
+              const r = await rpcFace?.probe?.(index);
+              return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] probe failed', e);
-              return { ok: false };
+              return null;
             }
           },
           async manualFailback(index) {
             try {
-              return await rpcFace?.manualFailback?.(index) ?? { ok: false };
+              const r = await rpcFace?.manualFailback?.(index);
+              return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] manualFailback failed', e);
-              return { ok: false };
+              return null;
             }
           },
         };

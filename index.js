@@ -132,13 +132,18 @@ function createRouter(config, log) {
       }
       return chosen;
     },
-    /** 失败后决定是否要求重试（切换路由） */
-    onFailedAttempt(provider, model, code) {
+    /**
+     * 失败后决定是否要求重试（切换路由）。
+     * p1OwnsFailure：失败确实发生在 P1 上（或本次请求未覆盖路由，P1 就是实际使用的
+     * 路由）时才允许把"找不到匹配"的失败归到 idx 0；否则 P2 的 AUTH/NO_ADAPTER 之类
+     * 失败会被误记到 P1 电路上，把健康的 P1 熔断掉。
+     */
+    onFailedAttempt(provider, model, code, p1OwnsFailure = true) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return false;
       let idx = queue.findIndex((r) => r.provider === provider && r.model === model);
       // P1 动态跟随：失败路由=当前会话模型且不等于队列静态 P1 时，把失败记到 P1（idx 0）
-      if (idx === -1 && config.p1Follow) idx = 0;
+      if (idx === -1 && config.p1Follow && p1OwnsFailure) idx = 0;
       if (idx === -1) return false; // 不是队列里的路由，不接管
       recordFailure(queue[idx], code);
       const nextIdx = this.resolveIndex();
@@ -180,6 +185,9 @@ import s from '@deepseek-ai/schemastery';
 // 队列顺序的独立持久化（不放 settings，避免每次写盘触发整页主题重算）。
 import { readQueueState, writeQueueState, normalizeQueue, statePath } from './state.js';
 
+// 与 @deepseek-ai/dsh-typert-protocol 内部常量同值（该包 0.2.1-rc.2 起不再导出
+// ./remote-methods 子路径，但协议本身仍是这个字符串键 + {version:1, methods:[...]} 结构，
+// 宿主自己的 dsh-repeat-tool-reminder / dsh-tmux-context 也直接硬编码同一常量）。
 const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-methods';
 
 /** 给原型打 Remote 方法标记（等价于 TS 装饰器编译产物） */
@@ -347,16 +355,31 @@ export function apply(ctx) {
   });
 
   // ---- agent/request：覆盖冻结调用配置 ----
+  // 记下"本次请求实际提案的路由"，供 request-error（P1 归属判定）与 assistant-stream
+  // （精确复位）使用。键是 `${provider}\u0000${model}`：失败尝试与随后的重试是同一步的
+  // 两次事件，用路由键而不是全局游标才能对上号。
+  let lastProposal = null; // { key, idx, overridden }
+
   ctx.effect(() =>
     ctx.on('agent/request', async (payload, next) => {
       try {
         const cfg = await next();
         const idx = router.resolveIndex();
-        if (idx === -1) return cfg;
+        if (idx === -1) {
+          lastProposal = null; // 队列不生效：原配置即提案，交由下游
+          return cfg;
+        }
         // P1（idx 0）动态跟随当前会话模型：不覆盖，放行原配置
-        if (idx === 0 && config.p1Follow) return cfg;
+        if (idx === 0 && config.p1Follow) {
+          lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: 0, overridden: false };
+          return cfg;
+        }
         const route = config.queue[idx];
-        if (!route) return cfg;
+        if (!route) {
+          lastProposal = null;
+          return cfg;
+        }
+        lastProposal = { key: router.keyOf(route), idx, overridden: true };
         return { ...cfg, provider: route.provider, model: route.model };
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] agent/request error, passing through: %s', e?.message);
@@ -369,14 +392,22 @@ export function apply(ctx) {
   ctx.effect(() =>
     ctx.on('agent/request-error', { prepend: true }, async (payload, next) => {
       const { provider, failure } = payload;
+      // payload.agent 由 dsh-agent 的 agentEvents() fused 注入，运行时确实存在
       const model = payload.agent?.callConfig?.model;
       try {
-        const switched = router.onFailedAttempt(provider, model, failure?.code);
+        // p1OwnsFailure：只有"本次提案本身就是 P1"（未被覆盖）时，才允许把找不到匹配的
+        // 失败归到 idx 0。否则 P2 的 AUTH/NO_PROVIDER 之类失败会被误记到 P1 的电路上，
+        // 导致 P1 被无故熔断。
+        const proposal = lastProposal;
+        const p1OwnsFailure =
+          config.p1Follow &&
+          (proposal === null || !proposal.overridden || proposal.idx === 0);
+        const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure);
         if (switched) return { kind: 'retry' };
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] request-error handling failed: %s', e?.message);
       }
-      // 非致命 / 未接管：让路给 dsh-llm-retry 等
+      // 非致命 / 未接管：必须 next()，否则 dsh-llm-retry 等下游永远接不到
       return next();
     }),
   );
@@ -387,10 +418,17 @@ export function apply(ctx) {
       try {
         const { frame } = payload;
         if (frame?.type !== 'end') return;
-        // end frame 意味着本次尝试至少走通了流；复位当前路由
+        // end 帧既可能是 committed 也可能是 abandoned（失败/中断），只有 committed 才算走通
+        if (frame.outcome?.kind !== 'committed') return;
+        // 复位"本次实际使用的那条路由"，而不是全局游标 activeIndex
+        // （用户在 UI 手动换模型后 P1 会跟随，用游标会复位错对象）
+        const proposal = lastProposal;
         const queue = config.queue || [];
-        const cur = queue[router.runtime.activeIndex];
-        if (cur) router.recordSuccess(cur);
+        let route = proposal && proposal.overridden ? queue[proposal.idx] : undefined;
+        if (!route && proposal) {
+          route = queue.find((r) => router.keyOf(r) === proposal.key);
+        }
+        if (route) router.recordSuccess(route);
       } catch {
         /* 忽略 */
       }
