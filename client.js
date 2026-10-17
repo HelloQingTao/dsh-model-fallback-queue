@@ -435,7 +435,11 @@ window.__ModuleLoader__.load({
           const al = btn?.getAttribute('aria-label') || '';
           const ti = btn?.title || '';
           const m = al.match(/当前 ([^·,，，]+)/) || ti.match(/^(.+?)\s*·/) || ti.match(/^([^·]+)/);
-          if (m) setSessionModelLabel(m[1].trim());
+          if (!m) return;
+          const next = m[1].trim();
+          // 只在值真的变化时才写 state：无条件 setState 会让组件每 3 秒重渲染一次，
+          // 而宿主侧栏（dsh-railist）订阅 DOM 变化后会把每次渲染当成一次新变更重算，导致重算不收敛刷屏。
+          setSessionModelLabel((prev) => (prev === next ? prev : next));
         };
         pull();
         const t = setInterval(pull, 3000);
@@ -446,7 +450,8 @@ window.__ModuleLoader__.load({
         let alive = true;
         const tick = async () => {
           const st = await host.getRuntimeSnapshot();
-          if (alive && st) setSnap(st);
+          // 同上：快照内容没变就不写 state，避免每 5 秒一次的无谓重渲染。
+          if (alive && st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
         };
         tick();
         const t = setInterval(tick, 5000);
