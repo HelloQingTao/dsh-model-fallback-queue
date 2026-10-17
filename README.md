@@ -74,7 +74,7 @@ dsh plugin --profile web add dsh-model-fallback-queue
 | 字段 | 默认值 | 说明 | 设置页可改 |
 | --- | --- | --- | --- |
 | `enabled` | `false` | 总开关 | ✅ |
-| `queue` | `[]` | 后备队列，数组顺序即优先级 | ✅ |
+| `queue` | `[]` | 后备队列，数组顺序即优先级（存在 `~/.dsh/fallback-queue-state.json`，不在 settings 里，见下方说明） | ✅ |
 | `failbackMode` | `sticky` | `sticky` / `probe` / `manual` | ✅ |
 | `p1Follow` | `true` | P1 跟随当前会话模型 | — |
 | `immediateCodes` | `QUOTA`、`ACCOUNT_QUOTA`、`RATE_LIMIT`、`AUTH`、`INVALID_CREDENTIAL`、`NO_ADAPTER` | 命中即熔断的错误码 | — |
@@ -83,6 +83,10 @@ dsh plugin --profile web add dsh-model-fallback-queue
 | `failbackDelayMs` | `300000` | 探测回切防抖毫秒 | — |
 
 日常用的开关、队列、恢复策略都在设置页；标「—」的高级旋钮默认值适用于绝大多数场景，需要时写进 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里本插件那一行的 `config`。
+
+**为什么队列不放在 settings 里**：DSH 的 `ui-theme` 只要你写一次 settings 文档，就会重推一次主题快照，前端随之把整页 design token 逐个移除再写回，深色模式下会闪一帧白。队列排序是高频操作（反复点上下箭头调优先级），放在 settings 里每点一次闪一次；改存独立的 JSON 文件就完全不碰 settings revision，白闪消失。
+
+队列文件是插件私有数据，**不在设置页的配置导出/备份范围内**，换机器需要重新排序。首次升级时如果文件不存在，会自动把 settings 里的旧队列迁移过来，所以已有配置不会丢。
 
 ### 兼容与注意
 
@@ -162,7 +166,7 @@ On every switch the core “model switched” notice appears in the session and 
 | Field | Default | Description | In Settings UI |
 | --- | --- | --- | --- |
 | `enabled` | `false` | Master switch | ✅ |
-| `queue` | `[]` | Backups; array order = priority | ✅ |
+| `queue` | `[]` | Backups; array order = priority (stored in `~/.dsh/fallback-queue-state.json`, not in settings — see below) | ✅ |
 | `failbackMode` | `sticky` | `sticky` / `probe` / `manual` | ✅ |
 | `p1Follow` | `true` | P1 follows the current session model | — |
 | `immediateCodes` | `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT`, `AUTH`, `INVALID_CREDENTIAL`, `NO_ADAPTER` | Codes that trip a route immediately | — |
@@ -171,6 +175,10 @@ On every switch the core “model switched” notice appears in the session and 
 | `failbackDelayMs` | `300000` | Probe-back debounce in ms | — |
 
 The everyday switch, queue and recovery mode live in the Settings UI; the advanced knobs marked “—” keep sensible defaults and can be set in the plugin row's `config` inside `~/.dsh/profiles/<profile>/cordis.patch.yml`.
+
+**Why the queue is not in settings**: any write to a DSH settings document makes `ui-theme` republish the theme snapshot, and the client then removes and rewrites every design token for the whole page — in dark mode that shows up as a one-frame white flash. Reordering the queue is frequent (you keep clicking the up/down arrows), so keeping it in settings meant a flash per click. Storing it in a standalone JSON file never touches the settings revision, and the flash is gone.
+
+That file is plugin-private data and is **outside the Settings UI's config export/backup**, so ordering must be redone on another machine. On the first upgrade, if the file is missing, the old queue in settings is migrated automatically — existing configuration is not lost.
 
 ### Compatibility & notes
 

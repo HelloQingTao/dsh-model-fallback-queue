@@ -26,7 +26,7 @@ const DEFAULT_IMMEDIATE_CODES = [
 
 const DEFAULT_CONFIG = {
   enabled: false,
-  queue: [], // [{ provider, model, manual? }]，索引 0 = P1
+  queue: [], // [{ provider, model }]，索引 0 = P1。来源是 state 文件，不是 settings
   p1Follow: true, // P1 跟随当前模型（用户在 UI 手动换模型时 P1 自动跟随）
   immediateCodes: DEFAULT_IMMEDIATE_CODES,
   failureThreshold: 2,
@@ -34,6 +34,9 @@ const DEFAULT_CONFIG = {
   failbackMode: 'sticky', // 'sticky' | 'probe' | 'manual'
   failbackDelayMs: 5 * 60_000, // probe 模式防抖
 };
+
+/** settings 里不允许出现的键：queue 已迁到 state 文件 */
+const SETTINGS_EXCLUDED_KEYS = ['queue'];
 
 const CIRCUIT = { CLOSED: 'closed', OPEN: 'open', HALF_OPEN: 'half_open' };
 
@@ -174,6 +177,8 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 // schemastery：Config 必须是它（toJSON 信封供 dsh-settings 派生 settings namespace，
 // ~standard 供 cordis 校验），同样走 peerDependencies 解析。
 import s from '@deepseek-ai/schemastery';
+// 队列顺序的独立持久化（不放 settings，避免每次写盘触发整页主题重算）。
+import { readQueueState, writeQueueState, normalizeQueue, statePath } from './state.js';
 
 const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-methods';
 
@@ -194,7 +199,7 @@ function markRemoteMethods(prototype, methods) {
  * 运行态 RPC 服务：浏览器半区经 ctx.remote['dsh-model-fallback-queue'].snapshot() 调用。
  * cordis 类插件实例化只传 (ctx, config)，故 router 经模块级桥接获取。
  */
-let serviceBridge = null; // { router, config, saveSettings } 由 apply 设置
+let serviceBridge = null; // { router, config, saveSettings, saveQueue } 由 apply 设置
 
 class FallbackQueueService extends TypertRemoteService {
   static inject = [];
@@ -233,8 +238,19 @@ class FallbackQueueService extends TypertRemoteService {
     this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
     return { ok: true };
   }
+
+  /** 读当前队列顺序（来自 state 文件，非 settings） */
+  getQueue() {
+    return { queue: this.config.queue || [] };
+  }
+
+  /** 写队列顺序：只落 state 文件，不碰 settings → 不触发主题重算 */
+  async setQueue(queue) {
+    const ok = await serviceBridge.saveQueue(queue);
+    return { ok, queue: this.config.queue || [] };
+  }
 }
-markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback']);
+markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue']);
 
 export const inject = ['settings'];
 
@@ -250,22 +266,73 @@ export function apply(ctx) {
       const desc = ctx.settings.describe().find((d) => d.ns === NS);
       if (desc) {
         settingsView = desc;
-        Object.assign(config, desc.value || {});
+        const value = { ...(desc.value || {}) };
+        // queue 不再由 settings 承载；老版本残留的 queue 值在迁移步骤里单独取用
+        const legacyQueue = value.queue;
+        for (const k of SETTINGS_EXCLUDED_KEYS) delete value[k];
+        Object.assign(config, value);
+        return legacyQueue;
       }
     } catch (e) {
       ctx.logger?.warn?.('[fallback-queue] settings read failed, using defaults: %s', e?.message);
     }
+    return undefined;
   }
 
   async function saveSettings(patch) {
     try {
-      Object.assign(config, patch);
-      await ctx.settings.update(NS, patch, settingsView?.revision);
+      const clean = { ...patch };
+      for (const k of SETTINGS_EXCLUDED_KEYS) delete clean[k];
+      Object.assign(config, clean);
+      if (Object.keys(clean).length === 0) return; // 只有 queue 的 patch 不该写 settings
+      await ctx.settings.update(NS, clean, settingsView?.revision);
       const desc = ctx.settings.describe().find((d) => d.ns === NS);
       if (desc) settingsView = desc;
     } catch (e) {
       ctx.logger?.warn?.('[fallback-queue] settings write failed: %s', e?.message);
     }
+  }
+
+  /**
+   * 写队列顺序到 state 文件。只碰文件，不碰 settings，因此不会触发
+   * ui-theme 的 adopt()/theme 重推，也就不会让整页主题重刷（白闪）。
+   */
+  async function saveQueue(queue) {
+    const next = normalizeQueue(queue);
+    config.queue = next;
+    const ok = await writeQueueState(next);
+    if (!ok) ctx.logger?.warn?.('[fallback-queue] queue write failed, keeping in-memory value');
+    return ok;
+  }
+
+  /**
+   * 启动时载入队列：state 文件优先；文件缺失（首次升级）时把 settings 里
+   * 残留的旧 queue 一次性迁移过来。迁移后 settings 侧不再保留 queue
+   * （也不主动去改文档 —— 改文档就是推 revision，正是要避开的动作）。
+   */
+  async function loadQueue(legacyQueue) {
+    const fromState = await readQueueState();
+    if (fromState) {
+      config.queue = fromState;
+      return;
+    }
+    const legacy = normalizeQueue(legacyQueue);
+    if (legacy.length > 0) {
+      config.queue = legacy;
+      const ok = await writeQueueState(legacy);
+      ctx.logger?.info?.(
+        '[fallback-queue] migrated %d queue entr%s from settings to %s',
+        legacy.length,
+        legacy.length === 1 ? 'y' : 'ies',
+        statePath(),
+      );
+      if (!ok) ctx.logger?.warn?.('[fallback-queue] migration write failed; will retry next boot');
+      // 此处刻意不回写 settings：Config 已无 queue 字段，写它只会白白推一次
+      // settings revision → 触发宿主主题全量重算（也就是白闪本身）。
+      // 残留的 queue 值留在文档里也无害：loadSettings 每次都会丢弃它。
+      return;
+    }
+    config.queue = [];
   }
 
   const router = createRouter(config, ctx.logger);
@@ -332,11 +399,14 @@ export function apply(ctx) {
 
   // ---- 启动加载设置 ----
   ctx.effect(() => {
-    loadSettings();
+    void (async () => {
+      const legacyQueue = await loadSettings();
+      await loadQueue(legacyQueue);
+    })().catch((e) => ctx.logger?.warn?.('[fallback-queue] boot load failed: %s', e?.message));
   });
 
   // ---- 运行态 RPC 服务 ----
-  serviceBridge = { router, config, saveSettings };
+  serviceBridge = { router, config, saveSettings, saveQueue };
   ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
   ctx.effect(() => () => {
     serviceBridge = null;
@@ -345,7 +415,9 @@ export function apply(ctx) {
   return {
     router,
     saveSettings,
+    saveQueue,
     loadSettings,
+    loadQueue,
   };
 }
 
@@ -355,12 +427,8 @@ export function apply(ctx) {
  */
 export const Config = s.object({
   enabled: s.boolean().default(DEFAULT_CONFIG.enabled).description('启用故障转移').volatile(),
-  queue: s.array(
-    s.object({
-      provider: s.string().required().description('provider id'),
-      model: s.string().required().description('model id'),
-    }).required(),
-  ).default([]).description('故障转移队列 P1→Pn').volatile(),
+  // queue 不在这里：它存在 $DSH_HOME/fallback-queue-state.json，
+  // 因为写 settings 会触发宿主主题全量重算（见 state.js 顶部注释）。
   p1Follow: s.boolean().default(DEFAULT_CONFIG.p1Follow).description('P1 跟随当前会话模型').volatile(),
   immediateCodes: s.array(s.string()).default(DEFAULT_IMMEDIATE_CODES).description('命中即熔断的错误码').volatile(),
   failureThreshold: s.number().default(DEFAULT_CONFIG.failureThreshold).description('连续失败次数阈值（软熔断）').volatile(),

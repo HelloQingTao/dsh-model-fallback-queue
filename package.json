@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-fallback-queue",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "模型故障转移队列：P1 限额/限流/不可用时自动切到队列下一个模型继续，全部图形界面配置 | Model fallback queue for DeepSeek Harness: auto-switch to the next model when the current one hits quota or rate limits",
   "type": "module",
   "main": "./index.js",
@@ -17,7 +17,8 @@
     "README.en.md",
     "LICENSE",
     "assets",
-    "docs/design-plan.md"
+    "docs/design-plan.md",
+    "state.js"
   ],
   "license": "MIT",
   "author": "HelloQingTao",
@@ -49,17 +50,25 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-alpha.2 || 0.2.1-alpha.4",
-    "@deepseek-ai/schemastery": "~3.18.4 || ~3.18.5-alpha.1"
+    "@deepseek-ai/schemastery": "~3.18.4 || ~3.18.5-alpha.1",
+    "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-atomic-write": "*"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     },
     "compatibility": {
-      "dshReleases": ["0.2.0-rc.2"]
+      "dshReleases": [
+        "0.2.0-rc.2"
+      ]
     }
   }
 }

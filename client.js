@@ -230,8 +230,9 @@ window.__ModuleLoader__.load({
       const [confirmRemove, setConfirmRemove] = React.useState(null); // 移除确认中的行索引
 
       const refresh = React.useCallback(async () => {
-        const s = await host.getSettings();
-        if (s) setCfg({ enabled: false, queue: [], failbackMode: STICKY, ...s });
+        // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
+        const [s, q] = await Promise.all([host.getSettings(), host.getQueue()]);
+        if (s) setCfg({ enabled: false, queue: [], failbackMode: STICKY, ...s, queue: q || [] });
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
       }, [host]);
@@ -251,17 +252,24 @@ window.__ModuleLoader__.load({
 
       const setMode = (m) => patch({ failbackMode: m });
 
+      // 队列写路径：只落 state 文件，不碰 settings，因此不会触发宿主主题全量重算
+      const writeQueue = async (q) => {
+        setBusy(true);
+        await host.setQueue(q);
+        await refresh();
+        setBusy(false);
+      };
+
       const move = async (i, dir) => {
         const q = [...cfg.queue];
         const j = i + dir;
         if (j < 0 || j >= q.length) return;
         [q[i], q[j]] = [q[j], q[i]];
-        await patch({ queue: q });
+        await writeQueue(q);
       };
 
       const remove = async (i) => {
-        const q = cfg.queue.filter((_, k) => k !== i);
-        await patch({ queue: q });
+        await writeQueue(cfg.queue.filter((_, k) => k !== i));
       };
 
       const add = async () => {
@@ -300,7 +308,9 @@ window.__ModuleLoader__.load({
                   return h(
                     'div',
                     {
-                      key: `${r.provider}/${r.model}/${i}`,
+                      // key 不能带索引：上移/下移后 index 变化会让 React 卸载重建整行，
+                      // 重建那一帧背景是空的，深色模式下就是一次白闪。用 provider/model 做稳定标识。
+                      key: `${r.provider}/${r.model}`,
                       style: {
                         display: 'flex',
                         alignItems: 'center',
@@ -315,8 +325,28 @@ window.__ModuleLoader__.load({
                     entry
                       ? h(Badge, { tone: STATE_TONE[entry.state] || 'muted' }, `${STATE_TEXT[entry.state] || entry.state}${entry.failures ? ` · 失败${entry.failures}` : ''}`)
                       : null,
-                    h('button', { onClick: () => move(i, -1), disabled: i === 0, style: btnSmall }, '↑'),
-                    h('button', { onClick: () => move(i, 1), disabled: i === cfg.queue.length - 1, style: btnSmall }, '↓'),
+                    h(
+                      'button',
+                      {
+                        onClick: () => move(i, -1),
+                        disabled: i === 0,
+                        title: i === 0 ? '已经是最高优先级' : '上移',
+                        'aria-label': '上移',
+                        style: i === 0 ? btnSmallDisabled : btnSmall,
+                      },
+                      '↑',
+                    ),
+                    h(
+                      'button',
+                      {
+                        onClick: () => move(i, 1),
+                        disabled: i === cfg.queue.length - 1,
+                        title: i === cfg.queue.length - 1 ? '已经是最低优先级' : '下移',
+                        'aria-label': '下移',
+                        style: i === cfg.queue.length - 1 ? btnSmallDisabled : btnSmall,
+                      },
+                      '↓',
+                    ),
                     confirmRemove === i
                       ? h('span', { style: { display: 'flex', gap: 4, alignItems: 'center' } },
                           h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, '确认移除？'),
@@ -382,7 +412,7 @@ window.__ModuleLoader__.load({
               onPick: async (provider, model) => {
                 setPickerOpen(false);
                 if (cfg.queue.some((r) => r.provider === provider && r.model === model)) return; // 防重复兜底
-                await patch({ queue: [...cfg.queue, { provider, model }] });
+                await writeQueue([...cfg.queue, { provider, model }]);
               },
             })
           : null,
@@ -414,6 +444,14 @@ window.__ModuleLoader__.load({
       background: 'transparent',
       color: 'inherit',
       cursor: 'pointer',
+    };
+
+    // 禁用态必须显式置灰：Chromium 只在 default 外观下把 disabled 按钮渲染成灰色，
+    // 这里 background/color 都是显式值，不手动降权的话箭头看起来仍是可点的。
+    const btnSmallDisabled = {
+      ...btnSmall,
+      opacity: 0.4,
+      cursor: 'not-allowed',
     };
 
     // ---------- 输入框芯片 ----------
@@ -560,7 +598,9 @@ window.__ModuleLoader__.load({
                   minWidth: 300,
                   borderRadius: 12,
                   border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
-                  background: 'var(--dsw-alias-bg-overlay, #fff)',
+                  // 不用 #fff 兜底：token 拿不到时透明，让宿主背景透出来，
+                  // 硬编码白色在深色主题下会是一次整块白闪。
+                  background: 'var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, transparent))',
                   boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
                   zIndex: 30,
                   overflow: 'hidden',
@@ -733,6 +773,24 @@ window.__ModuleLoader__.load({
           parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Index') }],
           result: { mode: 'src-json' },
         },
+        {
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/getQueue',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'getQueue',
+          invocation: { kind: 'direct' },
+          parameters: [],
+          result: { mode: 'src-json' },
+        },
+        {
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/setQueue',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'setQueue',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'queue', wire: 'queue', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Queue') }],
+          result: { mode: 'src-json' },
+        },
       ],
     };
 
@@ -800,8 +858,32 @@ window.__ModuleLoader__.load({
               console.warn('[fallback-queue] update failed', e);
             }
           },
+          // 队列经 host 侧 RPC 读写 state 文件（不走 settings，避免主题全量重算）
+          async getQueue() {
+            try {
+              const remote = rpcFace;
+              if (!remote?.getQueue) return null;
+              const r = await remote.getQueue();
+              const v = r && typeof r === 'object' && 'ok' in r ? (r.ok ? r.value : null) : r;
+              return Array.isArray(v?.queue) ? v.queue : null;
+            } catch (e) {
+              console.warn('[fallback-queue] getQueue failed', e);
+              return null;
+            }
+          },
+          async setQueue(queue) {
+            try {
+              const remote = rpcFace;
+              if (!remote?.setQueue) return;
+              const r = await remote.setQueue(queue);
+              if (r && typeof r === 'object' && 'ok' in r && r.ok === false) {
+                console.warn('[fallback-queue] setQueue rejected', r.error?.message);
+              }
+            } catch (e) {
+              console.warn('[fallback-queue] setQueue failed', e);
+            }
+          },
           async getRuntimeSnapshot() {
-            // 运行态经 host 侧 FallbackQueueService RPC（typert SRC fallback）获取
             try {
               const remote = rpcFace;
               if (!remote?.snapshot) return null;
