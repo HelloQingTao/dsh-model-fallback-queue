@@ -40,6 +40,26 @@ const SETTINGS_EXCLUDED_KEYS = ['queue'];
 
 const CIRCUIT = { CLOSED: 'closed', OPEN: 'open', HALF_OPEN: 'half_open' };
 
+/**
+ * 客户端错误码：请求本身有问题（参数不合法、内容被策略拒绝），换模型也救不了。
+ * 这类失败不能算路由不健康，也不能触发跨路由切换。
+ *
+ * 不在这个集合里的唯一非路由码是 UNKNOWN —— 它既可能是 "connection error."
+ * 也可能是插件自己的 TypeError，无法区分，交给 failureThreshold 软阈值兜底。
+ */
+const CLIENT_FAULT_CODES = new Set([
+  'INVALID_ARGS',
+  'INVALID_REQUEST',
+  'BAD_REQUEST',
+  'CONTEXT_WINDOW_EXCEEDED',
+  'IMAGE_OFFLOAD_REQUIRED',
+  'ABORTED',
+]);
+
+function isClientFaultCode(code) {
+  return typeof code === 'string' && CLIENT_FAULT_CODES.has(code);
+}
+
 function createRouter(config, log) {
   // 每个路由 key 的熔断状态，纯内存
   const circuits = new Map(); // key -> { state, failures, openedAt, lastAttemptAt }
@@ -145,6 +165,14 @@ function createRouter(config, log) {
       // P1 动态跟随：失败路由=当前会话模型且不等于队列静态 P1 时，把失败记到 P1（idx 0）
       if (idx === -1 && config.p1Follow && p1OwnsFailure) idx = 0;
       if (idx === -1) return false; // 不是队列里的路由，不接管
+      // 客户端错误（请求体不合法、内容被拒之类）不是路由健康问题：既不能熔断，
+      // 也不能把游标钉过去，否则一条坏请求会让健康路由整段冷却 60s。
+      if (isClientFaultCode(code)) return false;
+      // 游标钉到实际失败的这条路由上，再算下一个。否则："P1 跟随当前模型"模式下
+      // 用户手动选了 P3、P3 挂了，游标还停在 P2，resolveIndex() 会认为 P2 正常并
+      // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
+      // 挂掉的这条，同样切不出去。
+      runtime.activeIndex = idx;
       recordFailure(queue[idx], code);
       const nextIdx = this.resolveIndex();
       if (nextIdx === -1 || nextIdx === idx) return false; // 全熔断或仍在原路由：不重试
@@ -360,10 +388,28 @@ export function apply(ctx) {
   // 两次事件，用路由键而不是全局游标才能对上号。
   let lastProposal = null; // { key, idx, overridden }
 
+  /** 本次提案落在队列里的真实索引；-1 = 队列外 */
+  const actualRouteOf = (provider, model) => {
+    const queue = config.queue || [];
+    if (provider && model) {
+      const hit = queue.findIndex((r) => r.provider === provider && r.model === model);
+      if (hit >= 0) return hit;
+    }
+    return lastProposal ? lastProposal.idx : -1;
+  };
+
+  /** 游离标钉到实际在跑的路由（P1 跟随模式下 UI 手选的其他模型也算） */
+  const runtimePin = (idx) => {
+    if (Number.isInteger(idx) && idx >= 0) router.runtime.activeIndex = idx;
+  };
+
   ctx.effect(() =>
     ctx.on('agent/request', async (payload, next) => {
+      // 下游的 await next() 不能进 try：瀑布的 next() 只能消费一次，抛错之后再调一次
+      // 拿到的是 undefined，会把整轮请求的 provider/model 变成空的。真出异常就让
+      // prepareRequest 抛 —— agent-loop 会把它当成一个正常失败（UNKNOWN）吞掉。
+      const cfg = await next();
       try {
-        const cfg = await next();
         const idx = router.resolveIndex();
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
@@ -372,6 +418,7 @@ export function apply(ctx) {
         // P1（idx 0）动态跟随当前会话模型：不覆盖，放行原配置
         if (idx === 0 && config.p1Follow) {
           lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: 0, overridden: false };
+          runtimePin(actualRouteOf(cfg.provider, cfg.model));
           return cfg;
         }
         const route = config.queue[idx];
@@ -382,8 +429,9 @@ export function apply(ctx) {
         lastProposal = { key: router.keyOf(route), idx, overridden: true };
         return { ...cfg, provider: route.provider, model: route.model };
       } catch (e) {
-        ctx.logger?.warn?.('[fallback-queue] agent/request error, passing through: %s', e?.message);
-        return next();
+        ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
+        lastProposal = null;
+        return cfg;
       }
     }),
   );
@@ -392,16 +440,22 @@ export function apply(ctx) {
   ctx.effect(() =>
     ctx.on('agent/request-error', { prepend: true }, async (payload, next) => {
       const { provider, failure } = payload;
-      // payload.agent 由 dsh-agent 的 agentEvents() fused 注入，运行时确实存在
-      const model = payload.agent?.callConfig?.model;
+      // payload.agent 由 dsh-agent 的 agentEvents() fused 注入，运行时确实存在；
+      // callConfig 不一定有（宿主没给），actualModel 是 agent/request 里记下的真实路由模型。
+      const model = payload.agent?.callConfig?.model ?? lastProposal?.key?.split('\u0000')[1];
+      // 先把路由复原到"实际失败的那条"再判定归属：用户手动切到 P2/P3 后，队列里
+      // 找不到匹配是常态，此时若按"未覆盖 = P1 的锅"处理，会把 P2/P3 的 429 记到
+      // P1 头上，P1 无端熔断，P2/P3 反而永远健康、反复被选中。
+      const actual = lastProposal ? actualRouteOf(provider, model) : -1;
+      let p1OwnsFailure = true;
+      if (actual >= 0) {
+        runtimePin(actual);
+        p1OwnsFailure = actual === 0;
+      } else {
+        // P1 动态跟随：只有"本次提案就是 P1"时才允许把找不到匹配的失败归到 idx 0
+        p1OwnsFailure = config.p1Follow && (lastProposal === null || !lastProposal.overridden || lastProposal.idx === 0);
+      }
       try {
-        // p1OwnsFailure：只有"本次提案本身就是 P1"（未被覆盖）时，才允许把找不到匹配的
-        // 失败归到 idx 0。否则 P2 的 AUTH/NO_PROVIDER 之类失败会被误记到 P1 的电路上，
-        // 导致 P1 被无故熔断。
-        const proposal = lastProposal;
-        const p1OwnsFailure =
-          config.p1Follow &&
-          (proposal === null || !proposal.overridden || proposal.idx === 0);
         const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure);
         if (switched) return { kind: 'retry' };
       } catch (e) {
