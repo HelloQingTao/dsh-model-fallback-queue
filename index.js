@@ -166,10 +166,42 @@ function createRouter(config, log) {
   const health = new Map(); // key -> HEALTH.OK | HEALTH.INVALID
   // 会话模型快照：P1 应指的用户手选模型。apply 层仅在 P1 真实放行时写它，
   // 熔断覆盖（cfg 被改成后备模型）不碰——否则 P1 的 key 被后备模型永久污染。
-  let sessionModel = null; // { provider, model } | null
+  let sessionModel = null; // { provider, model } | null（全局最近一次；按会话的见下）
+  // 按会话记「用户手选的会话模型」：P1 行的名字、「会话模型」归属判定都按会话取。
+  // 只存纯数据，snapshot 直接 JSON 序列化下发，客户端据此显示 P1 行。
+  const sessionModelBySession = new Map(); // sessionId -> { provider, model }
+  /** 记录某会话的会话模型（用户手选 / P1 真实放行采样） */
+  function noteSessionModel(sessionId, provider, model) {
+    if (!provider || !model) return;
+    if (typeof sessionId === 'string' && sessionId) {
+      const prev = sessionModelBySession.get(sessionId);
+      if (!prev || prev.provider !== provider || prev.model !== model) {
+        sessionModelBySession.set(sessionId, { provider, model });
+      }
+    }
+    if (!sessionModel || sessionModel.provider !== provider || sessionModel.model !== model) {
+      sessionModel = { provider, model };
+    }
+  }
+  /** 取某会话的会话模型（无会话上下文/未记录 → 全局快照） */
+  function sessionModelFor(sessionId) {
+    if (typeof sessionId === 'string' && sessionId) {
+      const v = sessionModelBySession.get(sessionId);
+      if (v) return v;
+    }
+    return sessionModel;
+  }
+  /**
+   * P1 槽的位置：
+   * - p1Follow（P1 跟随当前会话模型）：-1 —— P1 不在 config.queue 里，队列索引 i 显示为 P(i+2)
+   * - 静态模式：0 —— P1 就是 config.queue[0]
+   * 这个区分是「P1 失败却把 P2 熔断掉」「切到后备后原地重试」两个老 bug 的根：
+   * 旧实现 p1Follow 也用 0 表示 P1，而 0 同时是队列第一条（UI 的 P2），一个下标两种身份。
+   */
+  const p1Position = () => (config.p1Follow ? -1 : 0);
   // 运行态
   const runtime = {
-    activeIndex: 0, // 当前生效的队列索引（= 已挂起、等待下一级请求替换的那条）
+    activeIndex: config.p1Follow ? -1 : 0, // 当前生效位置（p1Follow 下 -1 = P1 会话模型）
     inFlightIndex: -1, // 最近一次实际发出去的请求所走的路由；-1 = 未覆盖（放行原配置）
     lastProposal: null, // { key, idx, overridden } 最近一次 agent/request 的提案
     lastSwitch: null, // { from, to, code, at }
@@ -202,9 +234,9 @@ function createRouter(config, log) {
   function cursorFor(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return runtime; // 无会话上下文 → 全局回退
     const cur = sessionCursor.get(sessionId);
-    // 未记录的会话一律从 P1（0）起步：新会话不该继承别的会话的切换进度。
+    // 未记录的会话一律从 P1 槽起步：新会话不该继承别的会话的切换进度。
     // 全局 activeIndex 只反映"曾经有会话切过多深"，供探测/预检选起点，不污染新会话。
-    if (cur === undefined) return { activeIndex: 0 };
+    if (cur === undefined) return { activeIndex: p1Position() };
     return { activeIndex: cur }; // 只读视图，写经 setCursor
   }
   function setCursor(sessionId, idx) {
@@ -332,15 +364,45 @@ function createRouter(config, log) {
     return runtime.activeIndex;
   }
 
-  /** 邻近可用：从 fromIndex 起找第一个可用路由；粘滞模式绕回 P1 仅当其余全不可用 */
-  function pickFrom(startIndex, { allowP1 }) {    const queue = config.queue || [];
+  /** P1 槽（p1Follow 下 = 会话模型，不在队列里）是否可用：看它自己的电路 */
+  function p1Available(now = Date.now()) {
+    if (!sessionModel) return true; // 还没采样到会话模型：不能凭空判它坏
+    return isAvailable(sessionModel, now);
+  }
+  /** 某个位置是否可用：-1 = P1 槽，>=0 = config.queue 下标 */
+  function positionAvailable(pos, now = Date.now()) {
+    if (pos === -1) return p1Available(now);
+    const r = (config.queue || [])[pos];
+    return r ? isAvailable(r, now) : false;
+  }
+  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈） */
+  function nextPositions(startIndex) {
+    const queue = config.queue || [];
     const n = queue.length;
-    for (let step = 1; step <= n; step += 1) {
-      const i = (startIndex + step) % n;
-      if (i === 0 && !allowP1) continue; // 粘滞模式跳过 P1，除非绕满一圈
-      if (isAvailable(queue[i])) return i;
+    const out = [];
+    if (!config.p1Follow) {
+      for (let step = 1; step <= n; step += 1) out.push((startIndex + step) % n);
+      return out;
     }
-    return -1;
+    // p1Follow：环 = [P1(-1), 队列0=P2, 队列1=P3, ...]
+    const ring = [-1];
+    for (let i = 0; i < n; i += 1) ring.push(i);
+    const at = ring.indexOf(startIndex);
+    const base = at >= 0 ? at : 0;
+    for (let step = 1; step <= ring.length - 1; step += 1) out.push(ring[(base + step) % ring.length]);
+    return out;
+  }
+  /**
+   * 邻近可用：从 startIndex 起找第一个可用位置；粘滞模式绕回 P1 槽仅当其余全不可用。
+   * @returns {number|null} 位置（-1 = P1 槽）；null = 一个可用的都没有（null 不等于 -1）
+   */
+  function pickFrom(startIndex, { allowP1 = true, now = Date.now() } = {}) {
+    const p1Pos = p1Position();
+    for (const pos of nextPositions(startIndex)) {
+      if (pos === p1Pos && !allowP1) continue; // 粘滞模式跳过 P1，除非绕满一圈
+      if (positionAvailable(pos, now)) return pos;
+    }
+    return null;
   }
 
   return {
@@ -352,6 +414,10 @@ function createRouter(config, log) {
     recordSuccess,
     touch,
     pickFrom,
+    positionAvailable,
+    p1Position,
+    sessionModelFor,
+    noteSessionModel,
     staleHalfOpen,
     PROBE_TIMEOUT_MS,
     sessionCursor,
@@ -371,10 +437,23 @@ function createRouter(config, log) {
       if (n) touch();
       return n;
     },
+    /**
+     * 用户手选模型之后：把该会话拨回 P1 槽（p1Follow 下 = 用户刚选的那条）。
+     * 用户的换模型是明确的"我要用这条"意图，必须让它立刻生效；否则上一次熔断把
+     * 游标钉在后备路由上时，换模型后下一个请求照样发往旧的后备，用户看到的现象
+     * 就是"换了模型但没生效"（P1 行名字也不跟着变）。
+     */
+    retryFromP1(sessionId) {
+      setCursor(sessionId, p1Position());
+      setInFlight(sessionId, p1Position());
+      runtime.lastProposal = null;
+      touch();
+    },
     /** 会话结束（session/disposed）后清掉它的游标，防 Map 无限增长 */
     dropSession(sessionId) {
       let touched = sessionCursor.delete(sessionId);
       touched = sessionInFlight.delete(sessionId) || touched;
+      touched = sessionModelBySession.delete(sessionId) || touched;
       if (touched) touch();
     },
     /** 手动回切：清掉所有会话的 inFlight，回到指定索引（全局意图） */
@@ -415,10 +494,16 @@ function createRouter(config, log) {
       }
       // 游标检查每次都做：即使本轮无新判死，游标也可能因队列改动/手动切换
       // 停在早已判死的路由上，同样要立即切走。
-      const cur = Math.min(runtime.activeIndex, Math.max(queue.length - 1, 0));
-      if (queue[cur] && health.get(keyOf(queue[cur])) === HEALTH.INVALID) {
+      let cur = runtime.activeIndex;
+      if (cur < 0) cur = p1Position();
+      if (cur >= queue.length) cur = queue.length - 1;
+      // P1 槽（p1Follow 下 = 会话模型）的适配器也可能没注册：同样要当场切走
+      const curDead = cur === -1
+        ? Boolean(sessionModel && health.get(keyOf(sessionModel)) === HEALTH.INVALID)
+        : Boolean(queue[cur] && health.get(keyOf(queue[cur])) === HEALTH.INVALID);
+      if (curDead) {
         const next = pickFrom(cur, { allowP1: true });
-        if (next >= 0 && next !== cur) {
+        if (next !== null && next !== cur) {
           runtime.lastSwitch = { from: cur, to: next, code: 'NO_ADAPTER', at: Date.now() };
           runtime.activeIndex = next;
           changed = true;
@@ -431,15 +516,18 @@ function createRouter(config, log) {
     resolveIndex(now = Date.now(), sessionId = null) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return -1;
-      const cur = Math.min(cursorFor(sessionId).activeIndex, queue.length - 1);
-      if (isAvailable(queue[cur], now)) return cur;
-      // 当前路由不可用 → 找下一个可用
+      const p1Pos = p1Position();
+      let cur = cursorFor(sessionId).activeIndex;
+      if (!Number.isInteger(cur)) cur = p1Pos;
+      if (cur < 0 && !config.p1Follow) cur = 0;
+      if (cur >= queue.length) cur = queue.length - 1;
+      if (positionAvailable(cur, now)) return cur;
+      // 当前位置不可用 → 找下一个可用位置（可能是 P1 槽，也可能是队列里的后备）
       const sticky = config.failbackMode === 'sticky';
-      const next = pickFrom(cur, { allowP1: !sticky || cur === 0 ? true : false });
-      // 粘滞模式：只有绕一圈找不到任何非 P1 可用路由时才允许回 P1
-      let chosen = next;
-      if (chosen === -1 && sticky) chosen = pickFrom(cur, { allowP1: true });
-      if (chosen === -1) return -1; // 全熔断：放行原配置（降级）
+      // 粘滞模式：只有绕一圈找不到任何非 P1 可用位置时才允许回 P1
+      let chosen = pickFrom(cur, { allowP1: !sticky || cur === p1Pos, now });
+      if (chosen === null && sticky) chosen = pickFrom(cur, { allowP1: true, now });
+      if (chosen === null) return -1; // 全熔断：放行原配置（降级）
       if (chosen !== cur) {
         runtime.lastSwitch = {
           from: cur,
@@ -462,40 +550,88 @@ function createRouter(config, log) {
     onFailedAttempt(provider, model, code, p1OwnsFailure = true, failure = null, sessionId = null) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return false;
-      let idx = queue.findIndex((r) => r.provider === provider && r.model === model);
-      // P1 动态跟随：失败路由=当前会话模型且不等于队列静态 P1 时，把失败记到 P1（idx 0）
-      if (idx === -1 && config.p1Follow && p1OwnsFailure) idx = 0;
-      if (idx === -1) return false; // 不是队列里的路由，不接管
+      const p1Pos = p1Position();
+      // 失败路由在队列里就记在那一条上；不在队列里、又确属 P1 的失败才记到 P1 槽（-1）。
+      // 老实现把 P1 也写成 0，而 0 同时是队列第一条（UI 的 P2）——P1 失败会把 P2
+      // 无端熔断，切换直接跳过 P2 跳到 P3。
+      // 注意：p1Follow 下 P1 槽本身就用 -1 表示，所以"没找到"不能直接等于 -1 就返回，
+      // 否则 P1 的失败永远走不到下面（老代码正因如此把 P1 写成 0，才引出 P2 被误熔断）。
+      let pos = queue.findIndex((r) => r.provider === provider && r.model === model);
+      if (pos === -1) {
+        if (!config.p1Follow || !p1OwnsFailure) return false; // 不是队列里的路由，不接管
+        pos = p1Pos; // -1 = P1 槽（会话模型，队列外）
+      }
+      // P1 槽的路由对象就是会话模型本身（不在队列里，按失败现场构造）
+      const failedRoute = pos < 0 ? { provider, model } : queue[pos];
       // 调用侧问题（请求体不合法、内容被拒、Runtime 自伤）不是路由健康问题：既不能
       // 熔断，也不能把游标钉过去，否则一条坏请求会让健康路由整段冷却 60s。
       // 这个判定必须在 setCursor 之前——游标被钉到别的下标后，resolveIndex() 会推出
       // 下一条可用路由，等于对调用侧错误也做了一次切换。
       if (classifyFailureSource(code, failure?.message, failure?.status, config.immediateCodes)
         === FAILURE_SOURCE.CALLER) {
-        recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
+        recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
         return false;
       }
       // 游标钉到实际失败的这条路由上，再算下一个。否则："P1 跟随当前模型"模式下
       // 用户手动选了 P3、P3 挂了，游标还停在 P2，resolveIndex() 会认为 P2 正常并
       // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
       // 挂掉的这条，同样切不出去。
-      setCursor(sessionId, idx);
-      recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
+      setCursor(sessionId, pos);
+      recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
       const nextIdx = this.resolveIndex(Date.now(), sessionId);
-      if (nextIdx === -1 || nextIdx === idx) {
+      if (nextIdx === -1) {
+        // p1Follow 下 -1 有两种可能：绕回 P1 槽（会话模型，这也是一次真切换，UI 要跟着动），
+        // 或者"一条可用的都没有"（全熔断降级）。只有前者值得重试——P1 槽自己也刚挂了
+        // 还回去重试，只会变成对同一个坏模型的死循环。
+        if (!config.p1Follow || !positionAvailable(p1Pos)) {
+          touch(); // 熔断已记下，指标变了，通知一次
+          return false;
+        }
+        setInFlight(sessionId, p1Pos);
+        runtime.lastSwitch = { from: pos, to: p1Pos, code, at: Date.now() };
+        touch();
+        return true;
+      }
+      if (nextIdx === pos) {
         touch(); // 熔断已记下，指标变了，通知一次
-        return false; // 全熔断或仍在原路由：不重试
+        return false; // 仍在原路由：不重试
       }
       // 切换决定已作出：retry 后下一个请求会发往 nextIdx。若此处不同步 inFlight，
       // effectiveIndex() 会一直返回旧的值（上一条路由），UI 的指示器与
       // "当前"标记在下一轮 agent/request 瀑布跑过之前都指错对象（P3 在跑却显示 P2）。
       setInFlight(sessionId, nextIdx);
-      runtime.lastSwitch.code = code;
+      // lastSwitch 由 resolveIndex 写入（可能为 null：起点本来就不可用时它直接返回，
+      // 没有记录）——直接 .code = 会 TypeError 把整个失败处理吞掉。
+      if (runtime.lastSwitch) runtime.lastSwitch = { ...runtime.lastSwitch, code };
       touch();
       return true;
     },
     snapshot() {
       const queue = config.queue || [];
+      /** 一条路由的电路视图：entries（队列条目）与 p1（P1 槽）共用，字段完全一致 */
+      const view = (route) => {
+        const key = keyOf(route);
+        const c = circuitOf(key);
+        return {
+          state: c.state,
+          failures: c.failures,
+          // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
+          invalid: health.get(key) === HEALTH.INVALID,
+          // 熔断原因（ⓘ 悬浮提示）：只在电路非正常态时给出，健康路由不背历史失败的账
+          // caller 类失败不进熔断，但同样要能解释"为什么没切"：所以它的原因
+          // 在 closed 状态下也下发（其余状态仍只在非正常态给，健康路由不背旧账）。
+          lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED || c.lastSource === FAILURE_SOURCE.CALLER)
+            ? { code: c.lastCode, message: c.lastMessage, source: c.lastSource || null }
+            : null,
+          // 失败来源分层（provider/transport/unknown/caller）：caller = 请求或 Runtime
+          // 自身的问题，换模型救不了所以不熔断。UI 用它解释"为什么没切"。
+          source: c.lastSource || null,
+          openedAt: c.openedAt || null,
+          // 预计恢复 = 熔断时刻 + 冷却时长；half_open 之后就不再是"等冷却"了
+          recoverAt: c.state === CIRCUIT.OPEN ? c.openedAt + config.cooldownMs : null,
+          retryAfterMs: c.retryAfterMs || null,
+        };
+      };
       return {
         enabled: config.enabled,
         p1Follow: config.p1Follow,
@@ -509,35 +645,18 @@ function createRouter(config, log) {
         // 会话模型快照：P1 应该指的用户手选模型（不受熔断回写污染）。
         // UI 用它显示 P1 行名称，并在"会话模型 ≠ effective 路由"时判断是否已切走。
         sessionModel: sessionModel ? { ...sessionModel } : null, // 闭包内 let，见上方声明
+        // 按会话的会话模型：客户端按自己会话取，多会话下 P1 行名不会互相串
+        sessionModelBySession: Object.fromEntries(sessionModelBySession),
+        // P1 槽自己的电路视图（p1Follow 下 P1 = 会话模型，不在 config.queue 里）。
+        // 老客户端读不到它会退回 entries[0]，保持向后兼容。
+        p1: config.p1Follow && sessionModel
+          ? { provider: sessionModel.provider, model: sessionModel.model, ...view(sessionModel) }
+          : null,
         lastSwitch: runtime.lastSwitch,
         revision: runtime.revision,
         // 冷却时长给 UI：悬浮提示要用它把 openedAt 换算成"预计恢复"的时刻
         cooldownMs: config.cooldownMs,
-        entries: queue.map((r, i) => {
-          const c = circuitOf(keyOf(r));
-          return {
-            index: i,
-            provider: r.provider,
-            model: r.model,
-            state: c.state,
-            failures: c.failures,
-            // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
-            invalid: health.get(keyOf(r)) === HEALTH.INVALID,
-            // 熔断原因（ⓘ 悬浮提示）：只在电路非正常态时给出，健康路由不背历史失败的账
-            // caller 类失败不进熔断，但同样要能解释"为什么没切"：所以它的原因
-            // 在 closed 状态下也下发（其余状态仍只在非正常态给，健康路由不背旧账）。
-            lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED || c.lastSource === FAILURE_SOURCE.CALLER)
-              ? { code: c.lastCode, message: c.lastMessage, source: c.lastSource || null }
-              : null,
-            // 失败来源分层（provider/transport/unknown/caller）：caller = 请求或 Runtime
-            // 自身的问题，换模型救不了所以不熔断。UI 用它解释"为什么没切"。
-            source: c.lastSource || null,
-            openedAt: c.openedAt || null,
-            // 预计恢复 = 熔断时刻 + 冷却时长；half_open 之后就不再是"等冷却"了
-            recoverAt: c.state === CIRCUIT.OPEN ? c.openedAt + config.cooldownMs : null,
-            retryAfterMs: c.retryAfterMs || null,
-          };
-        }),
+        entries: queue.map((r, i) => ({ index: i, provider: r.provider, model: r.model, ...view(r) })),
       };
     },
   };
@@ -606,19 +725,30 @@ class FallbackQueueService extends TypertRemoteService {
     return { ok: true };
   }
 
-  /** 手动回切：把所有会话游标与全局游标拉回指定索引（默认 P1=0） */
+  /**
+   * 手动回切：把所有会话游标与全局游标拉回目标位置。
+   * index 省略或 -1 = P1 槽（p1Follow 下就是"当前会话模型"）。
+   * 注意 p1Follow 下 queue[0] 是 UI 的 P2，不是 P1——老实现固定 i=0 会让"切回 P1"
+   * 实际切到 P2，并把 from===to 的空操作也记进历史（UI 显示成 P2 → P2）。
+   */
   manualFailback(index) {
-    const i = Number.isFinite(index) ? index : 0;
-    const route = this.config.queue?.[i];
-    if (!route) return { ok: false };
-    const from = this.router.runtime.activeIndex;
-    // 手动回切是明确的全局意图：清掉所有会话游标，全部回到指定索引
+    const p1Pos = this.config.p1Follow ? -1 : 0;
+    const i = Number.isFinite(index) ? Number(index) : p1Pos;
+    if (i === -1) {
+      if (!this.config.p1Follow) return { ok: false }; // 静态模式没有"队列外的 P1"
+    } else if (!this.config.queue?.[i]) {
+      return { ok: false };
+    }
+    // 切换前的位置：优先"最近实际在跑的那条"，没有就用挂起游标
+    const r = this.router.runtime;
+    const from = r.inFlightIndex >= 0 ? r.inFlightIndex : r.activeIndex;
+    // 手动回切是明确的全局意图：清掉所有会话游标，全部回到目标位置
     this.router.resetSessionCursors();
     this.router.runtime.activeIndex = i;
-    // 手动回切后 UI 立刻应显示 P1，而不是继续显示上次失败的路由。
-    // 回切是全局意图：所有会话的 inFlight 都清掉，回全局值。
+    // 手动回切后 UI 立刻应显示目标位置，而不是继续显示上次失败的路由。
     this.router.resetSessionInFlight(i);
-    this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
+    // from === i 是空操作（已经在 P1 又点了一次）：不记历史，否则出现"P1 → P1"
+    if (from !== i) this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
     this.router.touch();
     return { ok: true };
   }
@@ -752,8 +882,19 @@ export function apply(ctx, llm) {
       if (event?.type !== 'model/selection') return;
       const d = event.data || {};
       if (!d.provider || !d.model) return;
-      if (router.sessionModel?.provider === d.provider && router.sessionModel?.model === d.model) return;
-      router.sessionModel = { provider: d.provider, model: d.model };
+      // 忽略"我们自己的覆盖被投影回来"的 selection：那是后备路由在跑，不是用户手选。
+      // 不忽略的话，每次熔断切到 P2/P3，宿主投影回写都会把 P1 的"本尊"改成后备模型。
+      const forced = router.runtime.lastProposal;
+      if (forced?.overridden && forced.idx >= 0) {
+        const q = (config.queue || [])[forced.idx];
+        if (q && q.provider === d.provider && q.model === d.model) return;
+      }
+      const sessionId = session?.id ?? null;
+      router.noteSessionModel(sessionId, d.provider, d.model);
+      // 用户手选模型 = "我要用这条"：把该会话拨回 P1 槽，下一个请求先试用户选的这条。
+      // 否则熔断把游标钉在后备上时，换模型根本不生效（老 bug：换了模型 P1 行还是旧名）。
+      lastProposal = null;
+      router.retryFromP1(sessionId);
       ctx.logger?.info?.('[fallback-queue] session model changed: %s/%s', d.provider, d.model);
       router.touch();
     }),
@@ -842,9 +983,9 @@ export function apply(ctx, llm) {
     return lastProposal ? lastProposal.idx : -1;
   };
 
-  /** 游离标钉到实际在跑的路由（P1 跟随模式下 UI 手选的其他模型也算） */
+  /** 游标钉到实际在跑的路由；-1 = P1 槽（p1Follow 下 UI 手选的是队列外模型时就是它） */
   const runtimePin = (idx) => {
-    if (Number.isInteger(idx) && idx >= 0) router.runtime.activeIndex = idx;
+    if (Number.isInteger(idx)) router.runtime.activeIndex = idx;
   };
 
   ctx.effect(() =>
@@ -857,24 +998,22 @@ export function apply(ctx, llm) {
       const sessionId = payload?.agent?.session?.id ?? null;
       try {
         const idx = router.resolveIndex(undefined, sessionId);
+        // p1Follow：-1 = P1 槽（会话模型，队列外）或"全熔断"降级 → 都放行原配置。
+        if (idx === -1 && config.p1Follow) {
+          lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: -1, overridden: false };
+          // P1 真实放行 = 用户所选会话模型的可靠采样点：更新快照（也按会话记一份）。
+          router.noteSessionModel(sessionId, cfg.provider, cfg.model);
+          runtimePin(-1);
+          // UI 显示的是"实际在跑的这条"：P1 槽就是 -1
+          router.setInFlight(sessionId, -1);
+          router.runtime.lastProposal = { ...lastProposal };
+          router.touch();
+          return cfg;
+        }
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
           router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
-          return cfg;
-        }
-        // P1（idx 0）动态跟随当前会话模型：不覆盖，放行原配置
-        if (idx === 0 && config.p1Follow) {
-          lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: 0, overridden: false };
-          // P1 真实放行 = 用户所选会话模型的可靠采样点：更新快照。
-          // 前提是这条路由没被判死/熔断（判死时 resolveIndex 不会返回 0）。
-          router.sessionModel = { provider: cfg.provider, model: cfg.model };
-          const actual = actualRouteOf(cfg.provider, cfg.model);
-          runtimePin(actual);
-          // UI 显示的是"实际在跑的这条"：用户手选了队列外的模型就是 -1（P1 跟随）
-          router.setInFlight(sessionId, actual);
-          router.runtime.lastProposal = { ...lastProposal };
-          router.touch();
           return cfg;
         }
         const route = config.queue[idx];
@@ -930,17 +1069,21 @@ export function apply(ctx, llm) {
       // 先把路由复原到"实际失败的那条"再判定归属：用户手动切到 P2/P3 后，队列里
       // 找不到匹配是常态，此时若按"未覆盖 = P1 的锅"处理，会把 P2/P3 的 429 记到
       // P1 头上，P1 无端熔断，P2/P3 反而永远健康、反复被选中。
+      const p1Pos = config.p1Follow ? -1 : 0;
       const actual = lastProposal ? actualRouteOf(provider, model) : -1;
       let p1OwnsFailure = true;
       if (actual >= 0) {
         runtimePin(actual);
-        p1OwnsFailure = actual === 0;
+        p1OwnsFailure = actual === p1Pos;
       } else {
-        // P1 动态跟随：只有"本次提案就是 P1"时才允许把找不到匹配的失败归到 idx 0
-        p1OwnsFailure = config.p1Follow && (lastProposal === null || !lastProposal.overridden || lastProposal.idx === 0);
+        // P1 动态跟随：只有"本次提案就是 P1 槽"时才允许把找不到匹配的失败归到 P1
+        // p1Follow 下只有"本次提案就是 P1 槽"才算 P1 的锅；静态模式下 P1 = queue[0]
+        p1OwnsFailure = config.p1Follow
+          ? (lastProposal === null || !lastProposal.overridden || lastProposal.idx === p1Pos)
+          : (lastProposal === null || lastProposal.idx === 0);
         // 额外防线：失败路由若等于熔断切走后的后备模型（会话模型快照之外的），
         // 说明这是后备路由自己的失败，不能算到 P1 头上。
-        const sm = router.sessionModel;
+        const sm = router.sessionModelFor(payload?.agent?.session?.id ?? null);
         if (p1OwnsFailure && sm && (sm.provider !== provider || sm.model !== model)) {
           p1OwnsFailure = false;
         }
@@ -980,7 +1123,10 @@ export function apply(ctx, llm) {
         // （用户在 UI 手动换模型后 P1 会跟随，用游标会复位错对象）
         const proposal = lastProposal;
         const queue = config.queue || [];
-        let route = proposal && proposal.overridden ? queue[proposal.idx] : undefined;
+        // idx === -1 = P1 槽：路由对象是会话模型本身，不在队列里，单独构造。
+        let route = proposal && proposal.idx === -1
+          ? router.sessionModelFor(payload?.agent?.session?.id ?? null)
+          : (proposal && proposal.overridden ? queue[proposal.idx] : undefined);
         if (!route && proposal) {
           route = queue.find((r) => router.keyOf(r) === proposal.key);
         }

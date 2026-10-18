@@ -520,11 +520,12 @@ window.__ModuleLoader__.load({
           ),
         ),
         // 运行态
-        snap?.lastSwitch
+        snap?.lastSwitch && snap.lastSwitch.from !== snap.lastSwitch.to
           ? h(
               'div',
               { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
-              `最近切换：P${snap.lastSwitch.from + ((snap.p1Follow ?? true) ? 2 : 1)} → P${snap.lastSwitch.to + ((snap.p1Follow ?? true) ? 2 : 1)}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
+              // 位置 → 显示名：p1Follow 下 -1 = P1、队列下标 i = P{i+2}；静态模式 i = P{i+1}
+              `最近切换：${snap.lastSwitch.from < 0 ? 'P1' : `P${snap.lastSwitch.from + (snap.p1Follow ? 2 : 1)}`} → ${snap.lastSwitch.to < 0 ? 'P1' : `P${snap.lastSwitch.to + (snap.p1Follow ? 2 : 1)}`}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
             )
           : null,
         pickerOpen
@@ -584,8 +585,16 @@ window.__ModuleLoader__.load({
       const onOpenSettings = props.onOpenSettings;
       const [snap, setSnap] = React.useState(null);
       const [open, setOpen] = React.useState(false);
+      // DOM 解析到的"当前模型名"与冻结后的"会话模型名"分开：
+      // DOM 名跟着宿主按钮走——故障转移后宿主按钮（request/header 投影）会显示
+      // 实际路由的模型，盲目跟随会把 P1 行（会话模型）显示成 P3 的模型。
+      // lastUncoveredName 只在本会话未被覆盖（未切走）时更新 = 用户真正手选的名字；
+      // 切走期间显示冻结值，切回 P1 后恢复跟随。
       const [sessionModelLabel, setSessionModelLabel] = React.useState('当前会话模型');
+      const [lastUncoveredName, setLastUncoveredName] = React.useState(null);
       const rootRef = React.useRef(null);
+      // DOM 取名函数存一份引用：点开弹层时要立刻重读一次，不能等 3s 轮询。
+      const pullLabelRef = React.useRef(null);
 
       // 从内置模型选择按钮 title 解析当前会话模型名（title 形如「选择模型，当前 GLM-5.3-Flash · x0.06，推理等级 Default」）
       React.useEffect(() => {
@@ -604,15 +613,71 @@ window.__ModuleLoader__.load({
           // 而宿主侧栏（dsh-railist）订阅 DOM 变化后会把每次渲染当成一次新变更重算，导致重算不收敛刷屏。
           setSessionModelLabel((prev) => (prev === next ? prev : next));
         };
+        pullLabelRef.current = pull;
         pull();
         const t = setInterval(pull, 3000);
         return () => clearInterval(t);
       }, []);
 
+      const enabled = snap?.enabled;
+      const entries = snap?.entries || [];
+      // 位置口径（与宿主一致）：-1 = P1 槽（p1Follow 下 = 会话模型，不在队列里），
+      // >=0 = config.queue 下标，UI 显示为 P{下标+2}。老宿主没有 -1 语义时按跟随兜底。
+      const active = Number.isInteger(snap?.activeIndex)
+        ? snap.activeIndex
+        : ((snap?.p1Follow ?? true) ? -1 : 0);
+      // 失效路由游标（activeIndex）表示"已经挂了、等下一级替换"，它会一直停在坏掉的那条；
+      // 用户要看的却是"这一轮实际跑在哪条"。inFlightIndex 才是后者，缺省时退回旧字段。
+      // 会话隔离：slot 组件由宿主按会话渲染（scope:'session'），props.sessionId 是当前
+      // 会话。宿主下发了 per-session inFlight 映射时，就以它为准——映射里没有本会话
+      // 意味着本会话尚未发过请求（未被覆盖），应显示 P1 跟随，绝不能退回全局
+      // inFlightIndex：那是"最近任意会话"的值，别的会话切到过 P2 会污染这里的显示。
+      // 只有旧宿主（没有 sessionInFlight 字段）才退回全局值。
+      const hasSessionMap = props.sessionId !== undefined
+        && snap?.sessionInFlight
+        && typeof snap.sessionInFlight === 'object';
+      const myInFlight = hasSessionMap
+        && Number.isInteger(snap.sessionInFlight[props.sessionId])
+        ? snap.sessionInFlight[props.sessionId]
+        : undefined;
+      const inFlight = myInFlight !== undefined ? myInFlight
+        : hasSessionMap ? -1
+        : Number.isInteger(snap?.inFlightIndex) ? snap.inFlightIndex : active;
+      const effective = myInFlight !== undefined ? myInFlight
+        : hasSessionMap ? -1
+        : Number.isInteger(snap?.effectiveIndex) ? snap.effectiveIndex : inFlight;
+
+      // P1 会话模型名的冻结与恢复：未覆盖（myInFlight<=0）时记下 DOM 名作为
+      // "用户真正手选的会话模型"；被覆盖（切到 P2/P3）期间停更——此时 DOM 名
+      // 已被宿主改写成实际路由模型，不能让它污染 P1 行显示。
+      // 注意：必须放在 myInFlight 声明之后（const 暂时性死区，放前面会 ReferenceError
+      // 导致整个芯片被错误边界摘掉）。
+      React.useEffect(() => {
+        const covered = Number.isInteger(myInFlight) && myInFlight > 0;
+        if (!covered && sessionModelLabel && sessionModelLabel !== '当前会话模型') {
+          setLastUncoveredName((prev) => (prev === sessionModelLabel ? prev : sessionModelLabel));
+        }
+      }, [myInFlight, sessionModelLabel]);
+      // 宿主下发的会话模型（权威来源）：用户手选模型时宿主立即派发 session/event 更新，
+      // 不依赖"下一次请求经过 P1"或 DOM 轮询，所以手动切换后 P1 行名立刻变。
+      const hostSessionModel = snap?.sessionModelBySession && props.sessionId
+        ? (snap.sessionModelBySession[props.sessionId] || null)
+        : (snap?.sessionModel || null);
+      const hostSessionModelName = hostSessionModel
+        ? `${hostSessionModel.provider} / ${hostSessionModel.model}`
+        : null;
+      // 展示用的会话模型名：优先宿主快照，其次冻结的 DOM 名（老宿主回退）。
+      const p1DisplayName = hostSessionModelName
+        || ((Number.isInteger(myInFlight) && myInFlight > 0 && lastUncoveredName)
+          ? lastUncoveredName
+          : sessionModelLabel);
+
       React.useEffect(() => {
         let alive = true;
         let timer = null;
         const tick = async () => {
+          // 顺手重读一次 DOM 模型名（老宿主回退路径也靠它）
+          if (pullLabelRef.current) pullLabelRef.current();
           let st = null;
           try {
             st = await host.getRuntimeSnapshot();
@@ -621,17 +686,19 @@ window.__ModuleLoader__.load({
           }
           if (!alive) return;
           if (st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
-          // 自适应轮询：稳定时 5s 一次；有请求在飞或刚发生过切换/失败时 1s 一次。
+          // 自适应轮询：稳定时 5s 一次；有请求在飞/刚发生过切换失败、或者弹层正开着时 1s 一次。
           // 固定 5s 会让"切到 P2 了但指示器还显示 P1"最多僵 5 秒，正是被报的问题。
           const live = st && (st.inFlightIndex >= 0 || st.entries?.some((e) => e.state !== 'closed'));
-          timer = setTimeout(tick, live ? 1000 : 5000);
+          timer = setTimeout(tick, live || open ? 1000 : 5000);
         };
+        // open 进依赖 = 点开/收起弹层时立刻重跑一次 tick：
+        // 用户手选模型后宿主早已更新状态，点开却要等下一次轮询才看到新名字（用户报"卡 3 秒以上"）。
         tick();
         return () => {
           alive = false;
           if (timer) clearTimeout(timer);
         };
-      }, [host]);
+      }, [host, open]);
 
       // 点击弹层外部自动关闭
       React.useEffect(() => {
@@ -649,37 +716,28 @@ window.__ModuleLoader__.load({
           document.removeEventListener('keydown', onKey);
         };
       }, [open]);
-
-      const enabled = snap?.enabled;
-      const entries = snap?.entries || [];
-      const active = snap?.activeIndex ?? 0;
-      // 失效路由游标（activeIndex）表示"已经挂了、等下一级替换"，它会一直停在坏掉的那条；
-      // 用户要看的却是"这一轮实际跑在哪条"。inFlightIndex 才是后者，缺省时退回旧字段。
-      // 会话隔离：slot 组件由宿主按会话渲染（scope:'session'），props.sessionId 是当前
-      // 会话。优先取 per-session inFlight 映射，避免另一个会话的切换覆盖本会话的显示。
-      const myInFlight = props.sessionId !== undefined
-        && snap?.sessionInFlight
-        && Number.isInteger(snap.sessionInFlight[props.sessionId])
-        ? snap.sessionInFlight[props.sessionId]
-        : undefined;
-      const inFlight = myInFlight !== undefined ? myInFlight
-        : Number.isInteger(snap?.inFlightIndex) ? snap.inFlightIndex : active;
-      const effective = myInFlight !== undefined ? myInFlight
-        : Number.isInteger(snap?.effectiveIndex) ? snap.effectiveIndex : inFlight;
       const p1Follow = snap?.p1Follow ?? true;
-      // 会话模型快照（宿主侧只在 P1 真实放行时采样）：P1 指的用户手选模型，
-      // 不随熔断切走而变化。空 = 本会话尚无采样点（插件刚装/队列关闭过）。
-      const sessionModel = snap?.sessionModel || null;
       const allOpen = entries.length > 0 && entries.every((e) => e.state === 'open');
       const halfOpen = entries.some((e) => e.state === 'half_open');
-      // P1 已被顶掉（超时/限流失效）但仍在兜底——以 P1 下标而不是 inFlight 判定：
-      // 切走之后新一级请求一开工 inFlight 就变了，用 inFlight 会让"P1 已失效"这个信号一闪而过。
-      const p1Leaning = entries.some((e) => e.index === 0 && e.state !== 'closed');
+      // P1 的电路视图：新宿主下发 snap.p1（P1 = 会话模型，不在队列里，没有下标）；
+      // 老宿主（p1Follow=false 或没这个字段）退回队列第一条。
+      const p1Entry = (snap?.p1 && typeof snap.p1 === 'object')
+        ? snap.p1
+        : (p1Follow ? null : entries.find((x) => x.index === 0));
+      // P1 是否就是当前生效位置（P1 槽 = -1；静态模式下 P1 = queue[0]）
+      const activeIsP1 = p1Follow ? active < 0 : active === 0;
+      const p1Active = p1Follow ? effective < 0 : effective === 0;
+      // P1 已被顶掉（超时/限流失效）但仍在兜底——以 P1 自己的电路状态判定，
+      // 而不是拿队列第一条（那是 P2）当 P1。
+      const p1Leaning = Boolean(p1Entry && p1Entry.state !== 'closed');
 
       let label;
       let tone = 'muted';
-      // p1Follow 下索引 0 = P1（会话模型）；队列索引 i 实际是 P(i+1)
-      const lbl = (idx) => (p1Follow ? (idx === 0 ? 'P1' : `P${idx + 1}`) : `P${idx + 1}`);
+      // 位置 → 显示名：-1 = P1 槽（p1Follow 下 = 会话模型，不在队列里）；
+      // 队列下标 i 在 p1Follow 下显示为 P{i+2}（P2 起），静态模式下为 P{i+1}（P1 起）。
+      // 曾把 p1Follow 下的下标 0 也当成 P1（迁就宿主一个下标两种身份的老 bug），
+      // 结果标题把 P2 喊成 P1、行内却标在 P2——用户截图里"当前 P2、P1 行也亮"的分裂。
+      const lbl = (idx) => (idx < 0 ? 'P1' : p1Follow ? `P${idx + 2}` : `P${idx + 1}`);
       if (!enabled) label = 'P';
       else if (allOpen) {
         label = 'P!';
@@ -687,24 +745,19 @@ window.__ModuleLoader__.load({
       } else if (halfOpen) {
         label = lbl(effective);
         tone = 'warn';
-      } else if (effective === 0 && p1Leaning) {
+      } else if (p1Active && p1Leaning) {
         // P1 已失效但请求仍由原配置兜着走（全熔断降级）——不能显示成"健康 P1"
-        label = lbl(0);
+        label = 'P1';
         tone = 'warn';
       } else {
         label = lbl(effective);
-        // 非 0 = 正在用后备路由，或本次请求没被覆盖（P1 跟随）
-        tone = effective === 0 ? 'ok' : 'warn';
+        // 不在 P1 就是在用后备路由（P1 槽 = -1；静态模式下 P1 = 队列第一条）
+        tone = p1Active ? 'ok' : 'warn';
       }
 
       const routeOf = (idx) => {
-        if (idx < 0) return `${sessionModelLabel}（会话模型，未覆盖）`;
-        if (idx === 0 && p1Follow) {
-          // P1 名称用 DOM 解析值（3s 轮询，手动切模型立即跟上）。
-          // 宿主 sessionModel 快照只用于归属判定，不用于显示——它要等下一次
-          // P1 放行才更新，手动切换后未发请求期间是旧值。
-          return `${sessionModelLabel}（会话模型）`;
-        }
+        // P1 槽（p1Follow 下 = -1）就是会话模型；静态模式下 P1 = 队列第一条
+        if (p1Follow ? idx < 0 : idx === 0) return `${p1DisplayName}（会话模型）`;
         const e = entries.find((x) => x.index === idx);
         return e ? `${e.provider} / ${e.model}` : '—';
       };
@@ -719,7 +772,9 @@ window.__ModuleLoader__.load({
       // 手动回切：把生效路由拉回 P1（p1Follow 下 = 当前会话模型）。
       // 「手动回切」模式下这是唯一的回去方式；其它模式也可用它提前结束粘滞。
       const failback = async () => {
-        await host.manualFailback(0);
+        // -1 = P1 槽（p1Follow 下即当前会话模型）。旧的 0 在 p1Follow 下是 P2，
+        // 点"切回 P1"实际切到 P2，还会把空操作记成历史。
+        await host.manualFailback(-1);
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
       };
@@ -797,7 +852,7 @@ window.__ModuleLoader__.load({
                   ? h(Badge, { tone: 'muted' }, '已关闭')
                   : allOpen
                     ? h(Badge, { tone: 'error' }, '全部熔断')
-                    : h(Badge, { tone: effective === 0 ? 'ok' : 'warn' }, `当前 ${lbl(effective)}`),
+                    : h(Badge, { tone: p1Active ? 'ok' : 'warn' }, `当前 ${lbl(effective)}`),
               ),
               // 实际在跑的路由：这块是"看报错就知道是谁的锅"的关键——
               // 指示器显示的不是你手选的模型，而是这一轮真实请求发去了哪里。
@@ -812,10 +867,13 @@ window.__ModuleLoader__.load({
                     borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                   },
                 },
-                active >= 0 && active !== effective
+                // 「已失效，已切走」只在真实熔断时显示：当前已不在 P1（p1Follow 下 -1 才是 P1）
+                // 且 P1 自己的熔断器非 closed。P1 健康时哪怕游标停在别处也不能喊"已失效"。
+                !activeIsP1 && p1Leaning
                   ? h('div', { style: { opacity: 0.75 } }, `${lbl(active)} 已失效，已切走`)
                   : null,
-                inFlight < 0 && enabled
+                // -1 在 p1Follow 下就是 P1（正常），不能说成"未经过队列"
+                !p1Follow && inFlight < 0 && enabled
                   ? h('div', { style: { opacity: 0.75 } }, '本轮请求未经过队列（放行原配置）')
                   : null,
               ),
@@ -827,23 +885,23 @@ window.__ModuleLoader__.load({
                     key: 'p1-row',
                     style: {
                       display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
-                      background: effective === 0 ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      background: p1Active ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
-                  h('span', { style: { flex: 1, opacity: effective === 0 ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                    sessionModelLabel + (p1Follow ? '（会话模型）' : '')),
-                  effective === 0
+                  h('span', { style: { flex: 1, opacity: p1Active ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                    p1DisplayName + (p1Follow ? '（会话模型）' : '')),
+                  p1Active
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
                     : null,
-                  h(Badge, { tone: entryTone(entries.find((x) => x.index === 0)) || 'ok' },
-                    entryText(entries.find((x) => x.index === 0)) || '正常'),
-                  circuitInfoIcon(entries.find((x) => x.index === 0), snap),
+                  h(Badge, { tone: entryTone(p1Entry) || 'ok' }, entryText(p1Entry) || '正常'),
+                  circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0
                   ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
                   : entries.map((e) => {
-                      const isActive = effective === e.index && !(p1Follow && e.index === 0);
+                      // 队列下标就是生效位置，直接比（p1Follow 下 e.index===0 是 P2，不再排除）
+                      const isActive = effective === e.index;
                       return h(
                         'div',
                         {
@@ -882,13 +940,15 @@ window.__ModuleLoader__.load({
                     color: 'var(--dsw-alias-label-secondary)',
                   },
                 },
-                snap?.lastSwitch
-                  ? `最近切换 P${snap.lastSwitch.from + ((snap.p1Follow ?? true) ? 2 : 1)} → P${snap.lastSwitch.to + ((snap.p1Follow ?? true) ? 2 : 1)}`
+                // from===to 是空操作（老宿主会记），不显示成"P2 → P2"
+                snap?.lastSwitch && snap.lastSwitch.from !== snap.lastSwitch.to
+                  ? `最近切换 ${lbl(snap.lastSwitch.from)} → ${lbl(snap.lastSwitch.to)}`
                   : '无切换记录',
                 h(
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-                  enabled && effective !== 0
+                  // 已经在 P1 就不给"切回 P1"按钮（-1/静态 0 都算在 P1）
+                  enabled && !p1Active
                     ? h(
                         'button',
                         {
@@ -904,6 +964,7 @@ window.__ModuleLoader__.load({
                             cursor: 'pointer',
                           },
                         },
+                        // 只有不在 P1 时才显示按钮：已在 P1 跟随再给"切回"就自相矛盾
                         '切回 P1',
                       )
                     : null,
