@@ -585,6 +585,23 @@ export function apply(ctx, llm) {
   // 兜底：启动后 3s 再跑一次，防宿主不派发该事件。
   const preflightTimer = setTimeout(() => runPreflight('boot'), 3000);
 
+  // ---- 会话模型实时跟随 ----
+  // 用户手动切模型时宿主派发 session/event {type:'model/selection', data:{provider,model,...}}
+  //（dsh-api-session-controller selectModel → agent.session.append）。
+  // 原方案只靠 P1 放行采样（agent/request 瀑布），手动切换后没发消息就是旧值。
+  // 这里监听 selection 事件直接更新 router.sessionModel，UI 3s 轮询即可跟上。
+  ctx.effect(() =>
+    ctx.on('session/event', (session, event) => {
+      if (event?.type !== 'model/selection') return;
+      const d = event.data || {};
+      if (!d.provider || !d.model) return;
+      if (router.sessionModel?.provider === d.provider && router.sessionModel?.model === d.model) return;
+      router.sessionModel = { provider: d.provider, model: d.model };
+      ctx.logger?.info?.('[fallback-queue] session model changed: %s/%s', d.provider, d.model);
+      router.touch();
+    }),
+  );
+
   // ---- 主动探测：半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，
   // 由插件直接经 llm.stream 发一条微型请求（maxTokens=1），首个 chunk 到达即算
   // 成功。否则"探测中"会永远挂着——没有新请求就没有人去试这条路由。

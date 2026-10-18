@@ -787,7 +787,6 @@ window.__ModuleLoader__.load({
                     borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                   },
                 },
-                h('div', null, `实际路由：${lbl(effective)} · ${routeOf(effective)}`),
                 active >= 0 && active !== effective
                   ? h('div', { style: { opacity: 0.75 } }, `${lbl(active)} 已失效，已切走`)
                   : null,
@@ -864,7 +863,7 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-                  enabled && inFlight !== 0
+                  enabled && effective !== 0
                     ? h(
                         'button',
                         {
