@@ -222,6 +222,113 @@ window.__ModuleLoader__.load({
     const STATE_TONE = { closed: 'ok', half_open: 'warn', open: 'error' };
     const STATE_TEXT = { closed: '正常', half_open: '探测中', open: '熔断' };
 
+    /** 熔断错误码的中文释义：叠在机器码之上，省得用户去查码表 */
+    const CODE_HINT = {
+      QUOTA: '额度或频率受限',
+      ACCOUNT_QUOTA: '账号额度用尽',
+      RATE_LIMIT: '请求频率超限',
+      AUTH: '鉴权失败（API Key 无效或过期）',
+      INVALID_CREDENTIAL: '鉴权失败（凭据无效）',
+      NO_ADAPTER: '没有可用适配器（provider 未注册或模型不存在）',
+      PI_AI_ERROR: '上游错误（适配层未能识别）',
+      UNKNOWN: '未知错误',
+    };
+
+    /**
+     * 毫秒 → 中文短时长（"45 秒" / "2 分 30 秒"）。
+     * @param {number} ms 毫秒
+     * @returns {string}
+     */
+    function shortDuration(ms) {
+      const total = Math.max(0, Math.round(Number(ms) / 1000));
+      if (total < 60) return `${total} 秒`;
+      const min = Math.floor(total / 60);
+      const sec = total % 60;
+      return sec === 0 ? `${min} 分钟` : `${min} 分 ${sec} 秒`;
+    }
+
+    /**
+     * 时间戳 → HH:mm:ss（本地时区）。
+     * @param {number} ts 毫秒时间戳
+     * @returns {string}
+     */
+    function clockText(ts) {
+      const d = new Date(ts);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    /**
+     * 拼熔断行的 ⓘ 悬浮提示：直接展示上游报错原文 + 预计恢复时刻。
+     * 没有可讲的就返回 null（不渲染 ⓘ）。
+     * @param {object} entry snapshot 里的队列条目
+     * @param {object} snap 运行时快照（取 cooldownMs）
+     * @returns {string|null}
+     */
+    function circuitInfoText(entry, snap) {
+      if (!entry) return null;
+      if (entry.invalid) {
+        return '配置失效：这个 provider 没有注册适配器，或模型已不存在。\n重试不会恢复，请到设置页把这条换成可用的模型。';
+      }
+      if (entry.state === 'closed') return null;
+      const err = entry.lastError || {};
+      const hint = err.code ? CODE_HINT[err.code] : null;
+      const lines = [`熔断原因：${err.code || '未知'}${hint ? `（${hint}）` : ''}`];
+      if (err.message) lines.push(`模型返回：${err.message}`);
+      if (entry.state === 'half_open') {
+        lines.push('当前状态：半开探测中，下一次请求会再试这条路由');
+      } else {
+        const cooldown = Number(snap?.cooldownMs) > 0 ? Number(snap.cooldownMs) : 60000;
+        lines.push(entry.recoverAt
+          ? `预计恢复：${clockText(entry.recoverAt)}（冷却 ${shortDuration(cooldown)} 后转半开探测）`
+          : `预计恢复：冷却 ${shortDuration(cooldown)} 后转半开探测`);
+        if (Number(entry.retryAfterMs) > 0) {
+          lines.push(`上游建议：等待 ${shortDuration(entry.retryAfterMs)} 再试`);
+        }
+      }
+      return lines.join('\n');
+    }
+
+    /**
+     * 熔断 / 配置失效行末尾的 ⓘ 图标（悬浮显示原因与恢复时间）。
+     * @param {object} entry snapshot 里的队列条目
+     * @param {object} snap 运行时快照
+     * @returns {object|null} React 元素；无需提示时为 null
+     */
+    function circuitInfoIcon(entry, snap) {
+      const text = circuitInfoText(entry, snap);
+      if (!text) return null;
+      return h('span', {
+        title: text,
+        'aria-label': text,
+        style: { cursor: 'help', opacity: 0.65, fontSize: 11, lineHeight: 1, flex: 'none' },
+      }, 'ⓘ');
+    }
+
+    /**
+     * 队列条目的徽章色调：配置失效（invalid）优先于熔断三态。
+     * 宿主早就在快照里给了 invalid，并注明"UI 据此直接标配置失效"——之前 UI 没用它，
+     * 一条永远跑不通的路由会显示成"正常"。
+     * @param {object} entry snapshot 里的队列条目
+     * @returns {string|null} entry 缺失时返回 null（由调用方给兜底）
+     */
+    function entryTone(entry) {
+      if (!entry) return null;
+      if (entry.invalid) return 'error';
+      return STATE_TONE[entry.state] || 'muted';
+    }
+
+    /**
+     * 队列条目的徽章文案：配置失效优先于熔断三态。
+     * @param {object} entry snapshot 里的队列条目
+     * @returns {string|null} entry 缺失时返回 null（由调用方给兜底）
+     */
+    function entryText(entry) {
+      if (!entry) return null;
+      if (entry.invalid) return '配置失效';
+      return STATE_TEXT[entry.state] || entry.state || null;
+    }
+
     function SettingsPage({ host }) {
       const [cfg, setCfg] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
@@ -323,8 +430,9 @@ window.__ModuleLoader__.load({
                     h('strong', { style: { width: 28 } }, cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`),
                     h('span', { style: { flex: 1, fontSize: 13 } }, `${r.provider} / ${r.model}`),
                     entry
-                      ? h(Badge, { tone: STATE_TONE[entry.state] || 'muted' }, `${STATE_TEXT[entry.state] || entry.state}${entry.failures ? ` · 失败${entry.failures}` : ''}`)
+                      ? h(Badge, { tone: entryTone(entry) }, `${entryText(entry)}${entry.failures ? ` · 失败${entry.failures}` : ''}`)
                       : null,
+                    circuitInfoIcon(entry, snap),
                     h(
                       'button',
                       {
@@ -432,6 +540,7 @@ window.__ModuleLoader__.load({
           },
           h('div', null, '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。'),
           h('div', { style: { marginTop: 2 } }, '🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用'),
+          h('div', { style: { marginTop: 2 } }, 'ⓘ 悬浮可看到熔断原因（模型返回的原文）与预计恢复时间'),
         ),
       );
     }
@@ -702,8 +811,9 @@ window.__ModuleLoader__.load({
                   effective === 0
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
                     : null,
-                  h(Badge, { tone: STATE_TONE[entries.find((x) => x.index === 0)?.state] || 'ok' },
-                    STATE_TEXT[entries.find((x) => x.index === 0)?.state] || '正常'),
+                  h(Badge, { tone: entryTone(entries.find((x) => x.index === 0)) || 'ok' },
+                    entryText(entries.find((x) => x.index === 0)) || '正常'),
+                  circuitInfoIcon(entries.find((x) => x.index === 0), snap),
                   ),
                 ...(entries.length === 0
                   ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
@@ -728,7 +838,8 @@ window.__ModuleLoader__.load({
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
                           : null,
-                        h(Badge, { tone: STATE_TONE[e.state] || 'muted' }, STATE_TEXT[e.state] || e.state),
+                        h(Badge, { tone: entryTone(e) || 'muted' }, entryText(e) || e.state),
+                        circuitInfoIcon(e, snap),
                       );
                     })),
               ),

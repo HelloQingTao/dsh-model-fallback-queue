@@ -88,6 +88,21 @@ function looksLikeQuota(message) {
   return typeof message === 'string' && QUOTA_TEXT.test(message);
 }
 
+/** 熔断原因正文的上限：上游偶尔把整页 HTML / 长堆栈当 message 回传，不能整段塞进快照 */
+const MAX_REASON_LENGTH = 300;
+
+/**
+ * 收敛上游报错原文成一行可展示的短文案（保留原文措辞，只压空白 + 截断）。
+ * @param {unknown} message 上游错误信息
+ * @returns {string} 空字符串表示没有可展示的原因
+ */
+function normalizeReason(message) {
+  if (typeof message !== 'string') return '';
+  const oneLine = message.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= MAX_REASON_LENGTH) return oneLine;
+  return `${oneLine.slice(0, MAX_REASON_LENGTH)}…`;
+}
+
 function createRouter(config, log) {
   // log = 宿主 ctx：touch() 需要它来 emit 变更通知（无 emit 能力时静默降级）
   // 每个路由 key 的熔断状态，纯内存
@@ -124,7 +139,11 @@ function createRouter(config, log) {
   function circuitOf(key) {
     let c = circuits.get(key);
     if (!c) {
-      c = { state: CIRCUIT.CLOSED, failures: 0, openedAt: 0, lastAttemptAt: 0 };
+      c = {
+        state: CIRCUIT.CLOSED, failures: 0, openedAt: 0, lastAttemptAt: 0,
+        // 最近一次失败的原因：熔断后 UI 的 ⓘ 悬浮提示要直接展示上游原文
+        lastCode: null, lastMessage: '', retryAfterMs: 0,
+      };
       circuits.set(key, c);
     }
     return c;
@@ -144,9 +163,14 @@ function createRouter(config, log) {
     return false;
   }
 
-  function recordFailure(route, code, message) {
+  function recordFailure(route, code, message, retryAfterMs) {
     const c = circuitOf(keyOf(route));
     c.failures += 1;
+    // 记下最近一次失败的原文与上游建议等待时长：熔断后 UI 悬浮提示直接展示它们。
+    // 每次都覆盖（而不是只在熔断那一刻记），因为熔断前的最后一次失败才是当前病根。
+    c.lastCode = typeof code === 'string' && code ? code : 'UNKNOWN';
+    c.lastMessage = normalizeReason(message);
+    c.retryAfterMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
     const immediate = config.immediateCodes.includes(code) || looksLikeQuota(message);
     if (immediate || c.failures >= config.failureThreshold) {
       c.state = CIRCUIT.OPEN;
@@ -160,6 +184,10 @@ function createRouter(config, log) {
     const c = circuitOf(keyOf(route));
     c.state = CIRCUIT.CLOSED;
     c.failures = 0;
+    // 恢复正常后清掉旧账：否则下次熔断前若没拿到新原因，悬浮提示会展示早已过期的报错
+    c.lastCode = null;
+    c.lastMessage = '';
+    c.retryAfterMs = 0;
     touch();
   }
 
@@ -266,8 +294,10 @@ function createRouter(config, log) {
      * p1OwnsFailure：失败确实发生在 P1 上（或本次请求未覆盖路由，P1 就是实际使用的
      * 路由）时才允许把"找不到匹配"的失败归到 idx 0；否则 P2 的 AUTH/NO_ADAPTER 之类
      * 失败会被误记到 P1 电路上，把健康的 P1 熔断掉。
+     * failure：宿主给的失败事实（LlmFailure），带上它才能把上游原文与建议等待时长
+     * 一起记进电路，供 UI 的熔断原因悬浮提示展示。
      */
-    onFailedAttempt(provider, model, code, p1OwnsFailure = true) {
+    onFailedAttempt(provider, model, code, p1OwnsFailure = true, failure = null) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return false;
       let idx = queue.findIndex((r) => r.provider === provider && r.model === model);
@@ -282,7 +312,7 @@ function createRouter(config, log) {
       // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
       // 挂掉的这条，同样切不出去。
       runtime.activeIndex = idx;
-      recordFailure(queue[idx], code);
+      recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs);
       const nextIdx = this.resolveIndex();
       if (nextIdx === -1 || nextIdx === idx) {
         touch(); // 熔断已记下，指标变了，通知一次
@@ -310,6 +340,8 @@ function createRouter(config, log) {
         sessionModel: sessionModel ? { ...sessionModel } : null, // 闭包内 let，见上方声明
         lastSwitch: runtime.lastSwitch,
         revision: runtime.revision,
+        // 冷却时长给 UI：悬浮提示要用它把 openedAt 换算成"预计恢复"的时刻
+        cooldownMs: config.cooldownMs,
         entries: queue.map((r, i) => {
           const c = circuitOf(keyOf(r));
           return {
@@ -320,6 +352,14 @@ function createRouter(config, log) {
             failures: c.failures,
             // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
             invalid: health.get(keyOf(r)) === HEALTH.INVALID,
+            // 熔断原因（ⓘ 悬浮提示）：只在电路非正常态时给出，健康路由不背历史失败的账
+            lastError: c.state !== CIRCUIT.CLOSED && c.lastCode
+              ? { code: c.lastCode, message: c.lastMessage }
+              : null,
+            openedAt: c.openedAt || null,
+            // 预计恢复 = 熔断时刻 + 冷却时长；half_open 之后就不再是"等冷却"了
+            recoverAt: c.state === CIRCUIT.OPEN ? c.openedAt + config.cooldownMs : null,
+            retryAfterMs: c.retryAfterMs || null,
           };
         }),
       };
@@ -660,7 +700,7 @@ export function apply(ctx, llm) {
         }
       }
       try {
-        const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure);
+        const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure, failure);
         // 诊断日志：判定结果。switched=false 时同时打出熔断态，便于看清是"全熔断"
         // 还是"码不在立即列表"还是"路由不在队列里"。
         ctx.logger?.info?.(
