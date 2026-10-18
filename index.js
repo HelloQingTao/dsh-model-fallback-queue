@@ -95,6 +95,9 @@ function createRouter(config, log) {
   // 配置级健康表：provider/model 是否真实存在（适配器注册表 + 模型目录）。
   // 区别于熔断：熔断是"暂时不可用会恢复"，这里是"配置死了永远不可用"。
   const health = new Map(); // key -> HEALTH.OK | HEALTH.INVALID
+  // 会话模型快照：P1 应指的用户手选模型。apply 层仅在 P1 真实放行时写它，
+  // 熔断覆盖（cfg 被改成后备模型）不碰——否则 P1 的 key 被后备模型永久污染。
+  let sessionModel = null; // { provider, model } | null
   // 运行态
   const runtime = {
     activeIndex: 0, // 当前生效的队列索引（= 已挂起、等待下一级请求替换的那条）
@@ -285,6 +288,10 @@ function createRouter(config, log) {
         touch(); // 熔断已记下，指标变了，通知一次
         return false; // 全熔断或仍在原路由：不重试
       }
+      // 切换决定已作出：retry 后下一个请求会发往 nextIdx。若此处不同步 inFlightIndex，
+      // effectiveIndex() 会一直返回旧的 inFlightIndex（上一条路由），UI 的指示器与
+      // "当前"标记在下一轮 agent/request 瀑布跑过之前都指错对象（P3 在跑却显示 P2）。
+      runtime.inFlightIndex = nextIdx;
       runtime.lastSwitch.code = code;
       touch();
       return true;
@@ -298,6 +305,9 @@ function createRouter(config, log) {
         inFlightIndex: runtime.inFlightIndex,
         effectiveIndex: effectiveIndex(),
         lastProposal: runtime.lastProposal ? { ...runtime.lastProposal } : null,
+        // 会话模型快照：P1 应该指的用户手选模型（不受熔断回写污染）。
+        // UI 用它显示 P1 行名称，并在"会话模型 ≠ effective 路由"时判断是否已切走。
+        sessionModel: sessionModel ? { ...sessionModel } : null, // 闭包内 let，见上方声明
         lastSwitch: runtime.lastSwitch,
         revision: runtime.revision,
         entries: queue.map((r, i) => {
@@ -528,6 +538,16 @@ export function apply(ctx, llm) {
   // 两次事件，用路由键而不是全局游标才能对上号。
   let lastProposal = null; // { key, idx, overridden }
 
+  // ---- 会话模型快照（P1 的"本尊"）----
+  // P1 跟随模式下 P1 = 当前会话模型。但"会话模型"必须指**用户手选的那个**，而不是
+  // 熔断切走后宿主回写的后备模型——否则熔断到 P3 后 P1 的 key 也变成 P3，会话模型
+  // 被永久污染，显示与归属判定全跟着错。
+  // 更新规则：仅当本轮请求未被本插件覆盖（overridden=false，即 P1 真实放行）时才
+  // 记录 cfg 的 provider/model；被覆盖的请求（overridden=true，发往后备）不碰它。
+  // 手动切模型必然经过 P1 放行路径，所以这里能自然跟上用户的手选。
+  // 存放在 router（router.sessionModel）上：snapshot 归 createRouter 所有，
+  // 放 apply 闭包会在 snapshot 里 ReferenceError。
+
   /** 本次提案落在队列里的真实索引；-1 = 队列外 */
   const actualRouteOf = (provider, model) => {
     const queue = config.queue || [];
@@ -560,6 +580,9 @@ export function apply(ctx, llm) {
         // P1（idx 0）动态跟随当前会话模型：不覆盖，放行原配置
         if (idx === 0 && config.p1Follow) {
           lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: 0, overridden: false };
+          // P1 真实放行 = 用户所选会话模型的可靠采样点：更新快照。
+          // 前提是这条路由没被判死/熔断（判死时 resolveIndex 不会返回 0）。
+          router.sessionModel = { provider: cfg.provider, model: cfg.model };
           const actual = actualRouteOf(cfg.provider, cfg.model);
           runtimePin(actual);
           // UI 显示的是"实际在跑的这条"：用户手选了队列外的模型就是 -1（P1 跟随）
@@ -629,6 +652,12 @@ export function apply(ctx, llm) {
       } else {
         // P1 动态跟随：只有"本次提案就是 P1"时才允许把找不到匹配的失败归到 idx 0
         p1OwnsFailure = config.p1Follow && (lastProposal === null || !lastProposal.overridden || lastProposal.idx === 0);
+        // 额外防线：失败路由若等于熔断切走后的后备模型（会话模型快照之外的），
+        // 说明这是后备路由自己的失败，不能算到 P1 头上。
+        const sm = router.sessionModel;
+        if (p1OwnsFailure && sm && (sm.provider !== provider || sm.model !== model)) {
+          p1OwnsFailure = false;
+        }
       }
       try {
         const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure);
