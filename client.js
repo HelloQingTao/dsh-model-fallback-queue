@@ -232,6 +232,11 @@ window.__ModuleLoader__.load({
       NO_ADAPTER: '没有可用适配器（provider 未注册或模型不存在）',
       PI_AI_ERROR: '上游错误（适配层未能识别）',
       UNKNOWN: '未知错误',
+      INVALID_ARGS: '请求参数不合法',
+      INVALID_REQUEST: '请求不合法',
+      BAD_REQUEST: '请求不合法',
+      TIMEOUT: '请求超时',
+      TRANSPORT: '链路中断',
     };
 
     /**
@@ -270,12 +275,21 @@ window.__ModuleLoader__.load({
       if (entry.invalid) {
         return '配置失效：这个 provider 没有注册适配器，或模型已不存在。\n重试不会恢复，请到设置页把这条换成可用的模型。';
       }
-      if (entry.state === 'closed') return null;
       const err = entry.lastError || {};
+      // 调用侧失败不熔断，但用户需要知道"为什么没切"：closed 状态下也给它提示。
+      const callerSide = err.source === 'caller';
+      if (entry.state === 'closed' && !callerSide) return null;
       const hint = err.code ? CODE_HINT[err.code] : null;
-      const lines = [`熔断原因：${err.code || '未知'}${hint ? `（${hint}）` : ''}`];
-      if (err.message) lines.push(`模型返回：${err.message}`);
-      if (entry.state === 'half_open') {
+      const lines = callerSide
+        ? [`本次未切换：${err.code || '未知'}${hint ? `（${hint}）` : ''}`]
+        : [`熔断原因：${err.code || '未知'}${hint ? `（${hint}）` : ''}`];
+      if (callerSide) {
+        lines.push('来源判定：请求本身或插件自身的问题，换模型也不会好，所以没有切换路由。');
+      }
+      if (err.message) lines.push(`${callerSide ? '错误原文' : '模型返回'}：${err.message}`);
+      if (callerSide && entry.state === 'closed') {
+        // 没进熔断，没有恢复时间可谈
+      } else if (entry.state === 'half_open') {
         lines.push('当前状态：半开探测中，下一次请求会再试这条路由');
       } else {
         const cooldown = Number(snap?.cooldownMs) > 0 ? Number(snap.cooldownMs) : 60000;

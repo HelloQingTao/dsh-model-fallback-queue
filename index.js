@@ -32,13 +32,11 @@ const DEFAULT_IMMEDIATE_CODES = [
   'AUTH',
   'INVALID_CREDENTIAL',
   'NO_ADAPTER',
-  // 适配层认不出的文本一律落这两个码（dsh-llm-pi-ai 的 classifyPiAiError 兜底是
-  // PI_AI_ERROR，dsh-agent-loop 的失败兜底是 UNKNOWN）。provider 把内部异常原样
-  // 当错误信息回传时（如把 `hook.callback.bind is not a function` 当 429 文案），
-  // 只会落到这里 —— 不算即时熔断的话，配额耗尽的 P1 会一直被当成健康路由反复选中。
-  // 代价是任何不认识的下游文本都会让本路由切一次；回切策略保证它冷却后能被探回。
-  'PI_AI_ERROR',
-  'UNKNOWN',
+  // PI_AI_ERROR / UNKNOWN 刻意不在这里：它们是适配层的"分类失败"兜底（dsh-llm-pi-ai
+  // 的 classifyPiAiError 兜底是 PI_AI_ERROR，dsh-agent-loop 的失败兜底是 UNKNOWN），
+  // 本身不携带"是谁的问题"的信息。把它们当即时码 = 任何不认识的失败都换一次路由，
+  // 会把 Runtime 自伤（TypeError、`is not a function`）和请求侧问题误判成 provider 故障。
+  // 现在改由 classifyFailureSource() 按来源分层判定。
 ];
 
 const DEFAULT_CONFIG = {
@@ -77,6 +75,24 @@ function isClientFaultCode(code) {
   return typeof code === 'string' && CLIENT_FAULT_CODES.has(code);
 }
 
+/** 失败来源分类（见 classifyFailureSource） */
+const FAILURE_SOURCE = { PROVIDER: 'provider', TRANSPORT: 'transport', UNKNOWN: 'unknown', CALLER: 'caller' };
+
+/** 适配层的"分类失败"兜底码：本身不携带"是谁的问题"的信息 */
+const FALLBACK_CODES = new Set(['PI_AI_ERROR', 'UNKNOWN']);
+
+/** 传输层码：链路瞬时故障，重试常能自愈 */
+const TRANSPORT_CODES = new Set(['TIMEOUT', 'TRANSPORT', 'SERVER', 'EMPTY_RESPONSE']);
+
+/** 调用侧自伤特征：这些文本只能出自 Runtime 内部（插件/宿主 bug），不会是 provider 文案 */
+const SELF_FAULT_TEXT = /is not a function|cannot read propert|is not a constructor|undefined is not an object|TypeError|ReferenceError/i;
+
+/** HTTP 状态码里明确指向"密钥/额度/模型不可用"的：上游自己承认问题源 */
+const PROVIDER_STATUS = new Set([401, 402, 403, 404, 429]);
+
+/** 请求体类状态码：换模型救不了，属调用侧 */
+const CALLER_STATUS = new Set([400, 413, 415, 422]);
+
 /** provider 侧的配额类措辞：适配层没认出错误码时靠它补判 */
 const QUOTA_TEXT = /quota|额度|限额|余额|insufficient|exceeded (?:your )?(?:current )?quota|usage limit|billing/i;
 
@@ -86,6 +102,44 @@ const QUOTA_TEXT = /quota|额度|限额|余额|insufficient|exceeded (?:your )?(
  */
 function looksLikeQuota(message) {
   return typeof message === 'string' && QUOTA_TEXT.test(message);
+}
+
+/**
+ * 失败来源分层：把"这条失败该不该算在路由头上、要多快熔断"从单一错误码里解耦。
+ *
+ * - provider  上游明确承认自己是问题源（配额/限流/鉴权码、配额措辞、指向性 HTTP 状态）
+ *             → 立即熔断，不必等阈值。
+ * - transport 网络/超时/流中断/5xx：可能是瞬时抖动 → 按 failureThreshold 累积。
+ * - unknown   兜底码（PI_AI_ERROR/UNKNOWN）且拿不到任何来源证据 → 同样按阈值：
+ *             既不秒切（避免把健康路由误杀），持续失败也终究会切走。
+ * - caller    请求本身有问题，或 Runtime 自伤（插件/宿主 bug）→ 换模型救不了：
+ *             不熔断、不切游标，只记原因让 UI 说清"为什么没切"。
+ *
+ * @param {string} code 适配层给出的错误码
+ * @param {unknown} message 上游错误原文
+ * @param {number|undefined} status HTTP 状态码（LlmFailure.status / LlmError.status）
+ * @param {string[]} immediateCodes 配置里的即时熔断码
+ * @returns {string} FAILURE_SOURCE 之一
+ */
+function classifyFailureSource(code, message, status, immediateCodes) {
+  // 1) 请求本身不合法（宿主已明确分类），或请求体类状态码
+  if (isClientFaultCode(code)) return FAILURE_SOURCE.CALLER;
+  if (typeof status === 'number' && CALLER_STATUS.has(status)) return FAILURE_SOURCE.CALLER;
+  // 2) 兜底码 + Runtime 自伤特征：这是插件/宿主的问题，不是 provider 的
+  if (FALLBACK_CODES.has(code) && SELF_FAULT_TEXT.test(typeof message === 'string' ? message : '')) {
+    return FAILURE_SOURCE.CALLER;
+  }
+  // 3) 上游明确的问题源。刻意用 !FALLBACK_CODES.has(code) 挡一道：历史配置里若还留着
+  //    PI_AI_ERROR/UNKNOWN，分层判定优先于旧配置，不会被拉回无条件熔断。
+  if (!FALLBACK_CODES.has(code) && Array.isArray(immediateCodes) && immediateCodes.includes(code)) {
+    return FAILURE_SOURCE.PROVIDER;
+  }
+  if (looksLikeQuota(message)) return FAILURE_SOURCE.PROVIDER;
+  if (typeof status === 'number' && PROVIDER_STATUS.has(status)) return FAILURE_SOURCE.PROVIDER;
+  // 4) 链路瞬时故障
+  if (TRANSPORT_CODES.has(code)) return FAILURE_SOURCE.TRANSPORT;
+  // 5) 不认识、也没证据
+  return FAILURE_SOURCE.UNKNOWN;
 }
 
 /** 熔断原因正文的上限：上游偶尔把整页 HTML / 长堆栈当 message 回传，不能整段塞进快照 */
@@ -182,7 +236,7 @@ function createRouter(config, log) {
       c = {
         state: CIRCUIT.CLOSED, failures: 0, openedAt: 0, lastAttemptAt: 0,
         // 最近一次失败的原因：熔断后 UI 的 ⓘ 悬浮提示要直接展示上游原文
-        lastCode: null, lastMessage: '', retryAfterMs: 0,
+        lastCode: null, lastMessage: '', retryAfterMs: 0, lastSource: null,
       };
       circuits.set(key, c);
     }
@@ -221,15 +275,30 @@ function createRouter(config, log) {
     return out;
   }
 
-  function recordFailure(route, code, message, retryAfterMs) {
-    const c = circuitOf(keyOf(route));
-    c.failures += 1;
-    // 记下最近一次失败的原文与上游建议等待时长：熔断后 UI 悬浮提示直接展示它们。
-    // 每次都覆盖（而不是只在熔断那一刻记），因为熔断前的最后一次失败才是当前病根。
+  /** 记下最近一次失败的原因：UI 悬浮提示直接展示它们。每次都覆盖，最后一次失败才是当前病根。 */
+  function stampFailure(c, code, message, retryAfterMs, source) {
     c.lastCode = typeof code === 'string' && code ? code : 'UNKNOWN';
     c.lastMessage = normalizeReason(message);
     c.retryAfterMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
-    const immediate = config.immediateCodes.includes(code) || looksLikeQuota(message);
+    c.lastSource = source;
+  }
+
+  /**
+   * 记一次失败并判定是否熔断。分层规则见 classifyFailureSource：
+   * provider 立即熔断；transport/unknown 按 failureThreshold 累积；caller 不计失败。
+   * @returns {string} 本次失败的来源分类（调用方可据此决定要不要切路由）
+   */
+  function recordFailure(route, code, message, retryAfterMs, status) {
+    const c = circuitOf(keyOf(route));
+    const source = classifyFailureSource(code, message, status, config.immediateCodes);
+    stampFailure(c, code, message, retryAfterMs, source);
+    if (source === FAILURE_SOURCE.CALLER) {
+      // 调用侧问题：不计失败、不熔断，但把原因记进电路，UI 才能解释"为什么没切"
+      touch();
+      return source;
+    }
+    c.failures += 1;
+    const immediate = source === FAILURE_SOURCE.PROVIDER;
     if (immediate || c.failures >= config.failureThreshold) {
       c.state = CIRCUIT.OPEN;
       c.openedAt = Date.now();
@@ -237,6 +306,7 @@ function createRouter(config, log) {
       c.failures = 0;
     }
     touch();
+    return source;
   }
 
   function recordSuccess(route) {
@@ -248,6 +318,7 @@ function createRouter(config, log) {
     c.lastCode = null;
     c.lastMessage = '';
     c.retryAfterMs = 0;
+    c.lastSource = null;
     touch();
   }
 
@@ -395,15 +466,21 @@ function createRouter(config, log) {
       // P1 动态跟随：失败路由=当前会话模型且不等于队列静态 P1 时，把失败记到 P1（idx 0）
       if (idx === -1 && config.p1Follow && p1OwnsFailure) idx = 0;
       if (idx === -1) return false; // 不是队列里的路由，不接管
-      // 客户端错误（请求体不合法、内容被拒之类）不是路由健康问题：既不能熔断，
-      // 也不能把游标钉过去，否则一条坏请求会让健康路由整段冷却 60s。
-      if (isClientFaultCode(code)) return false;
+      // 调用侧问题（请求体不合法、内容被拒、Runtime 自伤）不是路由健康问题：既不能
+      // 熔断，也不能把游标钉过去，否则一条坏请求会让健康路由整段冷却 60s。
+      // 这个判定必须在 setCursor 之前——游标被钉到别的下标后，resolveIndex() 会推出
+      // 下一条可用路由，等于对调用侧错误也做了一次切换。
+      if (classifyFailureSource(code, failure?.message, failure?.status, config.immediateCodes)
+        === FAILURE_SOURCE.CALLER) {
+        recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
+        return false;
+      }
       // 游标钉到实际失败的这条路由上，再算下一个。否则："P1 跟随当前模型"模式下
       // 用户手动选了 P3、P3 挂了，游标还停在 P2，resolveIndex() 会认为 P2 正常并
       // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
       // 挂掉的这条，同样切不出去。
       setCursor(sessionId, idx);
-      recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs);
+      recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
       const nextIdx = this.resolveIndex(Date.now(), sessionId);
       if (nextIdx === -1 || nextIdx === idx) {
         touch(); // 熔断已记下，指标变了，通知一次
@@ -447,9 +524,14 @@ function createRouter(config, log) {
             // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
             invalid: health.get(keyOf(r)) === HEALTH.INVALID,
             // 熔断原因（ⓘ 悬浮提示）：只在电路非正常态时给出，健康路由不背历史失败的账
-            lastError: c.state !== CIRCUIT.CLOSED && c.lastCode
-              ? { code: c.lastCode, message: c.lastMessage }
+            // caller 类失败不进熔断，但同样要能解释"为什么没切"：所以它的原因
+            // 在 closed 状态下也下发（其余状态仍只在非正常态给，健康路由不背旧账）。
+            lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED || c.lastSource === FAILURE_SOURCE.CALLER)
+              ? { code: c.lastCode, message: c.lastMessage, source: c.lastSource || null }
               : null,
+            // 失败来源分层（provider/transport/unknown/caller）：caller = 请求或 Runtime
+            // 自身的问题，换模型救不了所以不熔断。UI 用它解释"为什么没切"。
+            source: c.lastSource || null,
             openedAt: c.openedAt || null,
             // 预计恢复 = 熔断时刻 + 冷却时长；half_open 之后就不再是"等冷却"了
             recoverAt: c.state === CIRCUIT.OPEN ? c.openedAt + config.cooldownMs : null,
@@ -713,7 +795,7 @@ export function apply(ctx, llm) {
       ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
     } catch (e) {
-      router.recordFailure(route, e?.code || 'UNKNOWN', e?.message);
+      router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, undefined, e?.status);
       ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s', key, e?.code);
     } finally {
       probing = false;
