@@ -158,9 +158,27 @@ function createRouter(config, log) {
     // OPEN 且冷却到期 → 进入半开，允许一次探测
     if (now - c.openedAt >= config.cooldownMs) {
       c.state = CIRCUIT.HALF_OPEN;
+      c.halfOpenAt = now;
+      touch();
       return true;
     }
     return false;
+  }
+
+  /** 半开超时（毫秒）：超过仍无请求路过落账，就主动探测一次。0 = 关闭主动探测 */
+  const PROBE_TIMEOUT_MS = 90_000;
+  /** 找出所有"卡在半开且超时"的熔断器（供主动探测扫描） */
+  function staleHalfOpen(now = Date.now()) {
+    const queue = config.queue || [];
+    if (PROBE_TIMEOUT_MS <= 0) return [];
+    const out = [];
+    for (const [i, r] of queue.entries()) {
+      const c = circuitOf(keyOf(r));
+      if (c.state === CIRCUIT.HALF_OPEN && now - (c.halfOpenAt || 0) >= PROBE_TIMEOUT_MS) {
+        out.push({ index: i, route: r });
+      }
+    }
+    return out;
   }
 
   function recordFailure(route, code, message, retryAfterMs) {
@@ -175,6 +193,7 @@ function createRouter(config, log) {
     if (immediate || c.failures >= config.failureThreshold) {
       c.state = CIRCUIT.OPEN;
       c.openedAt = Date.now();
+      c.halfOpenAt = 0;
       c.failures = 0;
     }
     touch();
@@ -184,6 +203,7 @@ function createRouter(config, log) {
     const c = circuitOf(keyOf(route));
     c.state = CIRCUIT.CLOSED;
     c.failures = 0;
+    c.halfOpenAt = 0;
     // 恢复正常后清掉旧账：否则下次熔断前若没拿到新原因，悬浮提示会展示早已过期的报错
     c.lastCode = null;
     c.lastMessage = '';
@@ -221,6 +241,8 @@ function createRouter(config, log) {
     recordSuccess,
     touch,
     pickFrom,
+    staleHalfOpen,
+    PROBE_TIMEOUT_MS,
     health,
     HEALTH,
     /**
@@ -562,6 +584,44 @@ export function apply(ctx, llm) {
   // 启动预检要等适配器注册完成，adapters-updated 事件天然覆盖（xdpool 等注册完会触发）。
   // 兜底：启动后 3s 再跑一次，防宿主不派发该事件。
   const preflightTimer = setTimeout(() => runPreflight('boot'), 3000);
+
+  // ---- 主动探测：半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，
+  // 由插件直接经 llm.stream 发一条微型请求（maxTokens=1），首个 chunk 到达即算
+  // 成功。否则"探测中"会永远挂着——没有新请求就没有人去试这条路由。
+  let probing = false; // 串行化：同一时刻最多一个探测请求在飞
+  async function probeRoute(route) {
+    if (!llm?.stream || probing) return;
+    probing = true;
+    const key = router.keyOf(route);
+    ctx.logger?.info?.('[fallback-queue] probing half-open route %s/%s', route.provider, route.model);
+    try {
+      const stream = llm.stream({
+        provider: route.provider,
+        model: route.model,
+        messages: [{ role: 'user', name: 'fallback-queue-probe', content: 'ping' }],
+        maxTokens: 1,
+      });
+      // 首个 chunk 即视为可用（模型真的能回话），立即中断探测流省 token
+      const iter = stream[Symbol.asyncIterator]();
+      await Promise.race([
+        iter.next(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 15_000)),
+      ]);
+      router.recordSuccess(route);
+      ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
+      try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
+    } catch (e) {
+      router.recordFailure(route, e?.code || 'UNKNOWN', e?.message);
+      ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s', key, e?.code);
+    } finally {
+      probing = false;
+    }
+  }
+  const probeTimer = setInterval(() => {
+    const stale = router.staleHalfOpen();
+    if (stale.length) void probeRoute(stale[0].route); // 一次探一条，串行推进
+  }, 15_000);
+  ctx.effect(() => () => { clearTimeout(preflightTimer); clearInterval(probeTimer); });
 
   // 供 Client（经 remote RPC 或事件）读取运行态快照
   ctx.effect(() => {

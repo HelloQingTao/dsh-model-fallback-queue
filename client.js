@@ -673,11 +673,12 @@ window.__ModuleLoader__.load({
       }
 
       const routeOf = (idx) => {
-        if (idx < 0) return sessionModel ? `${sessionModel.provider}/${sessionModel.model}（会话模型，未覆盖）` : '会话模型（未覆盖）';
+        if (idx < 0) return `${sessionModelLabel}（会话模型，未覆盖）`;
         if (idx === 0 && p1Follow) {
-          // P1 行名称优先用宿主侧快照（不受熔断回写污染）；DOM 解析值只作前几次渲染的占位
-          const m = sessionModel ? `${sessionModel.provider}/${sessionModel.model}` : sessionModelLabel;
-          return `${m}（会话模型）`;
+          // P1 名称用 DOM 解析值（3s 轮询，手动切模型立即跟上）。
+          // 宿主 sessionModel 快照只用于归属判定，不用于显示——它要等下一次
+          // P1 放行才更新，手动切换后未发请求期间是旧值。
+          return `${sessionModelLabel}（会话模型）`;
         }
         const e = entries.find((x) => x.index === idx);
         return e ? `${e.provider} / ${e.model}` : '—';
@@ -807,7 +808,7 @@ window.__ModuleLoader__.load({
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
                   h('span', { style: { flex: 1, opacity: effective === 0 ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                    (sessionModel ? `${sessionModel.provider}/${sessionModel.model}` : sessionModelLabel) + (p1Follow ? '（会话模型）' : '')),
+                    sessionModelLabel + (p1Follow ? '（会话模型）' : '')),
                   effective === 0
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
                     : null,
