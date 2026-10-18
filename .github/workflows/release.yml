@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # 创建 GitHub Release 需要写权限（publish 本身用 OIDC，不靠这个）
   id-token: write # 关键：OIDC token 换发布凭据
 
 jobs:
@@ -47,3 +47,15 @@ jobs:
       - name: Publish
         if: steps.exists.outputs.published == 'false'
         run: npm publish # 不要加 --provenance，trusted publishing 会自动生成
+      - name: Create GitHub Release
+        # 只推 tag 不会自动生成 Release（Releases 列表会停在老版本），这里补上；
+        # 重跑同一 tag 时不重复创建。
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::notice::$GITHUB_REF_NAME 的 GitHub Release 已存在，跳过"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --latest
+          fi
