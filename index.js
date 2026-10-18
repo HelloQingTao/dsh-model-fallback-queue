@@ -122,6 +122,23 @@ function createRouter(config, log) {
     revision: 0, // 状态版本号，客户端据此判断是否需要重新拉 snapshot
     probeInFlight: false,
   };
+  // ---- 会话隔离的实际路由（inFlight）----
+  // inFlightIndex 与游标同理是会话体验：会话1在 P3、会话2在 P2 时，全局单值会让
+  // 两者互相覆盖，UI 的"当前"标记和外面的芯片显示都会指错对象。按 sessionId 记。
+  const sessionInFlight = new Map(); // sessionId -> index
+  function setInFlight(sessionId, idx) {
+    if (typeof sessionId !== 'string' || !sessionId) {
+      runtime.inFlightIndex = idx; // 无会话上下文 → 全局回退（探测/旧调用）
+      return;
+    }
+    sessionInFlight.set(sessionId, idx);
+    runtime.inFlightIndex = idx; // 全局值跟最近一次请求走（UI 主显示，多数场景只有一个活动会话）
+  }
+  function inFlightFor(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return runtime.inFlightIndex;
+    const v = sessionInFlight.get(sessionId);
+    return v !== undefined ? v : runtime.inFlightIndex;
+  }
   // ---- 会话隔离的切换游标 ----
   // 熔断状态（circuits）和配置判死（health）按 provider/model 记账，天然跨会话共享
   // ——同一个模型在哪都坏，这合理。但"切到第几级"是会话体验：会话1熔断切到 P2，
@@ -276,7 +293,15 @@ function createRouter(config, log) {
     },
     /** 会话结束（session/disposed）后清掉它的游标，防 Map 无限增长 */
     dropSession(sessionId) {
-      if (sessionCursor.delete(sessionId)) touch();
+      let touched = sessionCursor.delete(sessionId);
+      touched = sessionInFlight.delete(sessionId) || touched;
+      if (touched) touch();
+    },
+    /** 手动回切：清掉所有会话的 inFlight，回到指定索引（全局意图） */
+    resetSessionInFlight(idx) {
+      sessionInFlight.clear();
+      runtime.inFlightIndex = idx;
+      touch();
     },
     health,
     HEALTH,
@@ -370,15 +395,15 @@ function createRouter(config, log) {
       // 挂掉的这条，同样切不出去。
       setCursor(sessionId, idx);
       recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs);
-      const nextIdx = this.resolveIndex(undefined, sessionId);
+      const nextIdx = this.resolveIndex(Date.now(), sessionId);
       if (nextIdx === -1 || nextIdx === idx) {
         touch(); // 熔断已记下，指标变了，通知一次
         return false; // 全熔断或仍在原路由：不重试
       }
-      // 切换决定已作出：retry 后下一个请求会发往 nextIdx。若此处不同步 inFlightIndex，
-      // effectiveIndex() 会一直返回旧的 inFlightIndex（上一条路由），UI 的指示器与
+      // 切换决定已作出：retry 后下一个请求会发往 nextIdx。若此处不同步 inFlight，
+      // effectiveIndex() 会一直返回旧的值（上一条路由），UI 的指示器与
       // "当前"标记在下一轮 agent/request 瀑布跑过之前都指错对象（P3 在跑却显示 P2）。
-      runtime.inFlightIndex = nextIdx;
+      setInFlight(sessionId, nextIdx);
       runtime.lastSwitch.code = code;
       touch();
       return true;
@@ -390,6 +415,9 @@ function createRouter(config, log) {
         p1Follow: config.p1Follow,
         activeIndex: runtime.activeIndex,
         inFlightIndex: runtime.inFlightIndex,
+        // per-session inFlight 映射随快照下发：客户端按当前会话取自己的显示值，
+        // 修「会话1在 P3、会话2在 P2 时芯片互相覆盖」的问题。
+        sessionInFlight: Object.fromEntries(sessionInFlight),
         effectiveIndex: effectiveIndex(),
         lastProposal: runtime.lastProposal ? { ...runtime.lastProposal } : null,
         // 会话模型快照：P1 应该指的用户手选模型（不受熔断回写污染）。
@@ -496,8 +524,9 @@ class FallbackQueueService extends TypertRemoteService {
     // 手动回切是明确的全局意图：清掉所有会话游标，全部回到指定索引
     this.router.resetSessionCursors();
     this.router.runtime.activeIndex = i;
-    // 手动回切后 UI 立刻应显示 P1，而不是继续显示上次失败的路由
-    this.router.runtime.inFlightIndex = i;
+    // 手动回切后 UI 立刻应显示 P1，而不是继续显示上次失败的路由。
+    // 回切是全局意图：所有会话的 inFlight 都清掉，回全局值。
+    this.router.resetSessionInFlight(i);
     this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
     this.router.touch();
     return { ok: true };
@@ -739,7 +768,7 @@ export function apply(ctx, llm) {
         const idx = router.resolveIndex(undefined, sessionId);
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
-          router.runtime.inFlightIndex = -1;
+          setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
           return cfg;
         }
@@ -752,7 +781,7 @@ export function apply(ctx, llm) {
           const actual = actualRouteOf(cfg.provider, cfg.model);
           runtimePin(actual);
           // UI 显示的是"实际在跑的这条"：用户手选了队列外的模型就是 -1（P1 跟随）
-          router.runtime.inFlightIndex = actual;
+          setInFlight(sessionId, actual);
           router.runtime.lastProposal = { ...lastProposal };
           router.touch();
           return cfg;
@@ -760,19 +789,19 @@ export function apply(ctx, llm) {
         const route = config.queue[idx];
         if (!route) {
           lastProposal = null;
-          router.runtime.inFlightIndex = -1;
+          setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
           return cfg;
         }
         lastProposal = { key: router.keyOf(route), idx, overridden: true };
-        router.runtime.inFlightIndex = idx;
+        setInFlight(sessionId, idx);
         router.runtime.lastProposal = { ...lastProposal };
         router.touch();
         return { ...cfg, provider: route.provider, model: route.model };
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
         lastProposal = null;
-        router.runtime.inFlightIndex = -1;
+        setInFlight(sessionId, -1);
         router.runtime.lastProposal = null;
         return cfg;
       }
