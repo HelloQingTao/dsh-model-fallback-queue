@@ -15,6 +15,13 @@
  * - 插件任何异常不得拦截请求：全部 try/catch 兜底 next()。
  */
 
+/**
+ * 运行态变更通知事件名。
+ * 宿主（dsh-api-remotes）只转发白名单里的事件，这个不在白名单上，到不了浏览器 ——
+ * 客户端靠轮询 snapshot 的 revision 感知变化。emit 保留：将来宿主支持转发时会自动生效。
+ */
+const CHANGE_EVENT = 'dsh-model-fallback-queue/changed';
+
 const DEFAULT_IMMEDIATE_CODES = [
   'QUOTA',
   'ACCOUNT_QUOTA',
@@ -79,14 +86,29 @@ function looksLikeQuota(message) {
 }
 
 function createRouter(config, log) {
+  // log = 宿主 ctx：touch() 需要它来 emit 变更通知（无 emit 能力时静默降级）
   // 每个路由 key 的熔断状态，纯内存
   const circuits = new Map(); // key -> { state, failures, openedAt, lastAttemptAt }
   // 运行态
   const runtime = {
-    activeIndex: 0, // 当前生效的队列索引
+    activeIndex: 0, // 当前生效的队列索引（= 已挂起、等待下一级请求替换的那条）
+    inFlightIndex: -1, // 最近一次实际发出去的请求所走的路由；-1 = 未覆盖（放行原配置）
+    lastProposal: null, // { key, idx, overridden } 最近一次 agent/request 的提案
     lastSwitch: null, // { from, to, code, at }
+    revision: 0, // 状态版本号，客户端据此判断是否需要重新拉 snapshot
     probeInFlight: false,
   };
+
+  /** 任何会改变运行态/电路的操作都应调用它：bump 版本号 → 通知客户端拉新快照 */
+  function touch() {
+    runtime.revision += 1;
+    try {
+      // cordis 的 emit(name, ...args)：name 是第一个参数，不是 this
+      log?.emit?.(CHANGE_EVENT);
+    } catch {
+      /* 通知失败不影响主流程 */
+    }
+  }
 
   const keyOf = (route) => `${route.provider}\u0000${route.model}`;
 
@@ -119,17 +141,28 @@ function createRouter(config, log) {
       c.openedAt = Date.now();
       c.failures = 0;
     }
+    touch();
   }
 
   function recordSuccess(route) {
     const c = circuitOf(keyOf(route));
     c.state = CIRCUIT.CLOSED;
     c.failures = 0;
+    touch();
+  }
+
+  /**
+   * UI 指示器要显示的"实际生效路由"索引。
+   * 优先级：最近一次真的发出去的请求 > 已挂起等待替换的路由。
+   * -1 表示本次请求没被本插件覆盖（放行原配置）——此时 P1 才真的是"当前"。
+   */
+  function effectiveIndex() {
+    if (runtime.inFlightIndex >= 0) return runtime.inFlightIndex;
+    return runtime.activeIndex;
   }
 
   /** 邻近可用：从 fromIndex 起找第一个可用路由；粘滞模式绕回 P1 仅当其余全不可用 */
-  function pickFrom(startIndex, { allowP1 }) {
-    const queue = config.queue || [];
+  function pickFrom(startIndex, { allowP1 }) {    const queue = config.queue || [];
     const n = queue.length;
     for (let step = 1; step <= n; step += 1) {
       const i = (startIndex + step) % n;
@@ -146,6 +179,7 @@ function createRouter(config, log) {
     isAvailable,
     recordFailure,
     recordSuccess,
+    touch,
     pickFrom,
     /** 选出本次请求应使用的队列索引；返回 -1 表示队列不可用（放行原配置） */
     resolveIndex(now = Date.now()) {
@@ -167,6 +201,7 @@ function createRouter(config, log) {
           at: Date.now(),
         };
         runtime.activeIndex = chosen;
+        touch();
       }
       return chosen;
     },
@@ -193,8 +228,12 @@ function createRouter(config, log) {
       runtime.activeIndex = idx;
       recordFailure(queue[idx], code);
       const nextIdx = this.resolveIndex();
-      if (nextIdx === -1 || nextIdx === idx) return false; // 全熔断或仍在原路由：不重试
+      if (nextIdx === -1 || nextIdx === idx) {
+        touch(); // 熔断已记下，指标变了，通知一次
+        return false; // 全熔断或仍在原路由：不重试
+      }
       runtime.lastSwitch.code = code;
+      touch();
       return true;
     },
     snapshot() {
@@ -203,7 +242,11 @@ function createRouter(config, log) {
         enabled: config.enabled,
         p1Follow: config.p1Follow,
         activeIndex: runtime.activeIndex,
+        inFlightIndex: runtime.inFlightIndex,
+        effectiveIndex: effectiveIndex(),
+        lastProposal: runtime.lastProposal ? { ...runtime.lastProposal } : null,
         lastSwitch: runtime.lastSwitch,
+        revision: runtime.revision,
         entries: queue.map((r, i) => {
           const c = circuitOf(keyOf(r));
           return {
@@ -289,7 +332,10 @@ class FallbackQueueService extends TypertRemoteService {
     if (!route) return { ok: false };
     const from = this.router.runtime.activeIndex;
     this.router.runtime.activeIndex = i;
+    // 手动回切后 UI 立刻应显示 P1，而不是继续显示上次失败的路由
+    this.router.runtime.inFlightIndex = i;
     this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
+    this.router.touch();
     return { ok: true };
   }
 
@@ -389,7 +435,7 @@ export function apply(ctx) {
     config.queue = [];
   }
 
-  const router = createRouter(config, ctx.logger);
+  const router = createRouter(config, ctx);
 
   // 供 Client（经 remote RPC 或事件）读取运行态快照
   ctx.effect(() => {
@@ -431,32 +477,50 @@ export function apply(ctx) {
         const idx = router.resolveIndex();
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
+          router.runtime.inFlightIndex = -1;
+          router.runtime.lastProposal = null;
           return cfg;
         }
         // P1（idx 0）动态跟随当前会话模型：不覆盖，放行原配置
         if (idx === 0 && config.p1Follow) {
           lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: 0, overridden: false };
-          runtimePin(actualRouteOf(cfg.provider, cfg.model));
+          const actual = actualRouteOf(cfg.provider, cfg.model);
+          runtimePin(actual);
+          // UI 显示的是"实际在跑的这条"：用户手选了队列外的模型就是 -1（P1 跟随）
+          router.runtime.inFlightIndex = actual;
+          router.runtime.lastProposal = { ...lastProposal };
+          router.touch();
           return cfg;
         }
         const route = config.queue[idx];
         if (!route) {
           lastProposal = null;
+          router.runtime.inFlightIndex = -1;
+          router.runtime.lastProposal = null;
           return cfg;
         }
         lastProposal = { key: router.keyOf(route), idx, overridden: true };
+        router.runtime.inFlightIndex = idx;
+        router.runtime.lastProposal = { ...lastProposal };
+        router.touch();
         return { ...cfg, provider: route.provider, model: route.model };
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
         lastProposal = null;
+        router.runtime.inFlightIndex = -1;
+        router.runtime.lastProposal = null;
         return cfg;
       }
     }),
   );
 
   // ---- agent/request-error：熔断判定 + 请求重试 ----
+  // ⚠️ cordis 的签名是 on(name, listener, options)：options 在**第三个**参数。
+  // 曾经写成 on(name, { prepend: true }, fn)，于是 listener={prepend:true}、
+  // options=真函数，钩子记录变成 { callback: {prepend:true} } —— dispatch 时
+  // `hook.callback.bind` 必然抛 "is not a function"，而且熔断判定一次都没执行过。
   ctx.effect(() =>
-    ctx.on('agent/request-error', { prepend: true }, async (payload, next) => {
+    ctx.on('agent/request-error', async (payload, next) => {
       const { provider, failure } = payload;
       // payload.agent 由 dsh-agent 的 agentEvents() fused 注入，运行时确实存在；
       // callConfig 不一定有（宿主没给），actualModel 是 agent/request 里记下的真实路由模型。
@@ -481,7 +545,7 @@ export function apply(ctx) {
       }
       // 非致命 / 未接管：必须 next()，否则 dsh-llm-retry 等下游永远接不到
       return next();
-    }),
+    }, { prepend: true }),
   );
 
   // ---- agent/assistant-stream：成功即复位熔断 ----

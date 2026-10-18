@@ -486,16 +486,25 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true;
+        let timer = null;
         const tick = async () => {
-          const st = await host.getRuntimeSnapshot();
-          // 同上：快照内容没变就不写 state，避免每 5 秒一次的无谓重渲染。
-          if (alive && st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
+          let st = null;
+          try {
+            st = await host.getRuntimeSnapshot();
+          } catch (e) {
+            console.warn('[fallback-queue] snapshot failed', e);
+          }
+          if (!alive) return;
+          if (st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
+          // 自适应轮询：稳定时 5s 一次；有请求在飞或刚发生过切换/失败时 1s 一次。
+          // 固定 5s 会让"切到 P2 了但指示器还显示 P1"最多僵 5 秒，正是被报的问题。
+          const live = st && (st.inFlightIndex >= 0 || st.entries?.some((e) => e.state !== 'closed'));
+          timer = setTimeout(tick, live ? 1000 : 5000);
         };
         tick();
-        const t = setInterval(tick, 5000);
         return () => {
           alive = false;
-          clearInterval(t);
+          if (timer) clearTimeout(timer);
         };
       }, [host]);
 
@@ -519,25 +528,44 @@ window.__ModuleLoader__.load({
       const enabled = snap?.enabled;
       const entries = snap?.entries || [];
       const active = snap?.activeIndex ?? 0;
+      // 失效路由游标（activeIndex）表示"已经挂了、等下一级替换"，它会一直停在坏掉的那条；
+      // 用户要看的却是"这一轮实际跑在哪条"。inFlightIndex 才是后者，缺省时退回旧字段。
+      const inFlight = Number.isInteger(snap?.inFlightIndex) ? snap.inFlightIndex : active;
+      const effective = Number.isInteger(snap?.effectiveIndex) ? snap.effectiveIndex : inFlight;
       const p1Follow = snap?.p1Follow ?? true;
       const allOpen = entries.length > 0 && entries.every((e) => e.state === 'open');
       const halfOpen = entries.some((e) => e.state === 'half_open');
+      // P1 已被顶掉（超时/限流失效）但仍在兜底——以 P1 下标而不是 inFlight 判定：
+      // 切走之后新一级请求一开工 inFlight 就变了，用 inFlight 会让"P1 已失效"这个信号一闪而过。
+      const p1Leaning = entries.some((e) => e.index === 0 && e.state !== 'closed');
 
       let label;
       let tone = 'muted';
-      // p1Follow 下 activeIndex 0 = P1（会话模型）；队列索引 i 实际是 P(i+1)
+      // p1Follow 下索引 0 = P1（会话模型）；队列索引 i 实际是 P(i+1)
       const lbl = (idx) => (p1Follow ? (idx === 0 ? 'P1' : `P${idx + 1}`) : `P${idx + 1}`);
       if (!enabled) label = 'P';
       else if (allOpen) {
         label = 'P!';
         tone = 'error';
       } else if (halfOpen) {
-        label = lbl(active);
+        label = lbl(effective);
+        tone = 'warn';
+      } else if (effective === 0 && p1Leaning) {
+        // P1 已失效但请求仍由原配置兜着走（全熔断降级）——不能显示成"健康 P1"
+        label = lbl(0);
         tone = 'warn';
       } else {
-        label = lbl(active);
-        tone = active === 0 ? 'ok' : 'warn';
+        label = lbl(effective);
+        // 非 0 = 正在用后备路由，或本次请求没被覆盖（P1 跟随）
+        tone = effective === 0 ? 'ok' : 'warn';
       }
+
+      const routeOf = (idx) => {
+        if (idx < 0) return '会话模型（未覆盖）';
+        if (idx === 0 && p1Follow) return `${sessionModelLabel}（会话模型）`;
+        const e = entries.find((x) => x.index === idx);
+        return e ? `${e.provider} / ${e.model}` : '—';
+      };
 
       const toneColor = {
         ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
@@ -623,9 +651,32 @@ window.__ModuleLoader__.load({
                   },
                 },
                 '模型故障转移',
-                allOpen
-                  ? h(Badge, { tone: 'error' }, '全部熔断')
-                  : h(Badge, { tone: enabled ? 'ok' : 'muted' }, enabled ? '运行中' : '已关闭'),
+                !enabled
+                  ? h(Badge, { tone: 'muted' }, '已关闭')
+                  : allOpen
+                    ? h(Badge, { tone: 'error' }, '全部熔断')
+                    : h(Badge, { tone: effective === 0 ? 'ok' : 'warn' }, `当前 ${lbl(effective)}`),
+              ),
+              // 实际在跑的路由：这块是"看报错就知道是谁的锅"的关键——
+              // 指示器显示的不是你手选的模型，而是这一轮真实请求发去了哪里。
+              h(
+                'div',
+                {
+                  style: {
+                    padding: '8px 14px',
+                    fontSize: 11,
+                    lineHeight: '18px',
+                    color: 'var(--dsw-alias-label-secondary)',
+                    borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                  },
+                },
+                h('div', null, `实际路由：${lbl(effective)} · ${routeOf(effective)}`),
+                active >= 0 && active !== effective
+                  ? h('div', { style: { opacity: 0.75 } }, `${lbl(active)} 已失效，已切走`)
+                  : null,
+                inFlight < 0 && enabled
+                  ? h('div', { style: { opacity: 0.75 } }, '本轮请求未经过队列（放行原配置）')
+                  : null,
               ),
               // 队列条目
               h(
@@ -635,21 +686,22 @@ window.__ModuleLoader__.load({
                     key: 'p1-row',
                     style: {
                       display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
-                      background: (active === -1 || (active === 0 && p1Follow)) ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      background: effective === 0 ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
-                  h('span', { style: { flex: 1, opacity: (active === 0 && p1Follow) ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  h('span', { style: { flex: 1, opacity: effective === 0 ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                     sessionModelLabel + (p1Follow ? '（会话模型）' : '')),
-                  (active === 0 && p1Follow)
+                  effective === 0
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
                     : null,
-                  h(Badge, { tone: 'ok' }, '正常'),
+                  h(Badge, { tone: STATE_TONE[entries.find((x) => x.index === 0)?.state] || 'ok' },
+                    STATE_TEXT[entries.find((x) => x.index === 0)?.state] || '正常'),
                   ),
                 ...(entries.length === 0
                   ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
                   : entries.map((e) => {
-                      const isActive = e.index === active && !(p1Follow && e.index === 0);
+                      const isActive = effective === e.index && !(p1Follow && e.index === 0);
                       return h(
                         'div',
                         {
@@ -693,7 +745,7 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-                  enabled && active !== 0
+                  enabled && inFlight !== 0
                     ? h(
                         'button',
                         {
