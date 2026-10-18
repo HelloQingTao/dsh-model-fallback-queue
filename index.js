@@ -22,6 +22,9 @@
  */
 const CHANGE_EVENT = 'dsh-model-fallback-queue/changed';
 
+/** 配置级健康：路由的 provider/model 是否真实存在。INVALID = 重试无意义，直接跳过 */
+const HEALTH = { OK: 'ok', INVALID: 'invalid' };
+
 const DEFAULT_IMMEDIATE_CODES = [
   'QUOTA',
   'ACCOUNT_QUOTA',
@@ -89,6 +92,9 @@ function createRouter(config, log) {
   // log = 宿主 ctx：touch() 需要它来 emit 变更通知（无 emit 能力时静默降级）
   // 每个路由 key 的熔断状态，纯内存
   const circuits = new Map(); // key -> { state, failures, openedAt, lastAttemptAt }
+  // 配置级健康表：provider/model 是否真实存在（适配器注册表 + 模型目录）。
+  // 区别于熔断：熔断是"暂时不可用会恢复"，这里是"配置死了永远不可用"。
+  const health = new Map(); // key -> HEALTH.OK | HEALTH.INVALID
   // 运行态
   const runtime = {
     activeIndex: 0, // 当前生效的队列索引（= 已挂起、等待下一级请求替换的那条）
@@ -122,6 +128,9 @@ function createRouter(config, log) {
   }
 
   function isAvailable(route, now = Date.now()) {
+    // 配置级失效（provider 没注册适配器 / 模型已不存在）优先于熔断状态：
+    // 这类路由重试多少次都不会好，等冷却毫无意义，必须直接判死。
+    if (health.get(keyOf(route)) === HEALTH.INVALID) return false;
     const c = circuitOf(keyOf(route));
     if (c.state === CIRCUIT.CLOSED || c.state === CIRCUIT.HALF_OPEN) return true;
     // OPEN 且冷却到期 → 进入半开，允许一次探测
@@ -181,6 +190,50 @@ function createRouter(config, log) {
     recordSuccess,
     touch,
     pickFrom,
+    health,
+    HEALTH,
+    /**
+     * 预检队列：逐条核对 provider 是否有已注册适配器（llm.listProviders）。
+     * 适配器缺失 = 配置级死亡（NO_ADAPTER 必然发生），当场判 INVALID 并触发一次
+     * 重选——不等请求撞上去才发现。返回变更摘要供日志/诊断用。
+     */
+    async preflight(llm) {
+      const queue = config.queue || [];
+      if (!llm?.listProviders) return { checked: 0, invalid: [] };
+      let registered;
+      try {
+        registered = new Set(llm.listProviders().map((p) => p.id));
+      } catch {
+        return { checked: 0, invalid: [] }; // 适配器表不可读：不误杀，保持原状
+      }
+      const invalid = [];
+      let changed = false;
+      for (const r of queue) {
+        const key = keyOf(r);
+        const dead = !registered.has(r.provider);
+        if (dead && health.get(key) !== HEALTH.INVALID) {
+          health.set(key, HEALTH.INVALID);
+          invalid.push({ provider: r.provider, model: r.model });
+          changed = true;
+        } else if (!dead && health.get(key) === HEALTH.INVALID) {
+          health.delete(key); // 适配器回来了（插件装回/配置修复）→ 自动复活
+          changed = true;
+        }
+      }
+      // 游标检查每次都做：即使本轮无新判死，游标也可能因队列改动/手动切换
+      // 停在早已判死的路由上，同样要立即切走。
+      const cur = Math.min(runtime.activeIndex, Math.max(queue.length - 1, 0));
+      if (queue[cur] && health.get(keyOf(queue[cur])) === HEALTH.INVALID) {
+        const next = pickFrom(cur, { allowP1: true });
+        if (next >= 0 && next !== cur) {
+          runtime.lastSwitch = { from: cur, to: next, code: 'NO_ADAPTER', at: Date.now() };
+          runtime.activeIndex = next;
+          changed = true;
+        }
+      }
+      if (changed) touch();
+      return { checked: queue.length, invalid, changed };
+    },
     /** 选出本次请求应使用的队列索引；返回 -1 表示队列不可用（放行原配置） */
     resolveIndex(now = Date.now()) {
       const queue = config.queue || [];
@@ -255,6 +308,8 @@ function createRouter(config, log) {
             model: r.model,
             state: c.state,
             failures: c.failures,
+            // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
+            invalid: health.get(keyOf(r)) === HEALTH.INVALID,
           };
         }),
       };
@@ -352,9 +407,9 @@ class FallbackQueueService extends TypertRemoteService {
 }
 markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue']);
 
-export const inject = ['settings'];
+export const inject = ['settings', 'llm'];
 
-export function apply(ctx) {
+export function apply(ctx, llm) {
   const config = { ...DEFAULT_CONFIG };
 
   // ---- 设置持久化：namespace = 插件行 id ----
@@ -436,6 +491,27 @@ export function apply(ctx) {
   }
 
   const router = createRouter(config, ctx);
+
+  // ---- 路由预检：启动时 + 适配器拓扑变化时，核对队列里的 provider 是否真的存在 ----
+  // 没有这一步时，"provider 被卸载/改名/模型下架"只能等请求撞上 NO_ADAPTER、熔断
+  // 计数走完才被发现；预检在装配期就判死并切走。llm 服务缺失（旧宿主/单测环境）
+  // 时 preflight 内部直接返回，不报错。
+  async function runPreflight(trigger) {
+    const result = await router.preflight(llm);
+    if (result.invalid?.length) {
+      ctx.logger?.warn?.(
+        '[fallback-queue] preflight(%s): %d entr%s dead (no adapter): %s',
+        trigger,
+        result.invalid.length,
+        result.invalid.length === 1 ? 'y' : 'ies',
+        result.invalid.map((r) => `${r.provider}/${r.model}`).join(', '),
+      );
+    }
+  }
+  ctx.effect(() => ctx.on('llm/adapters-updated', () => runPreflight('adapters-updated')));
+  // 启动预检要等适配器注册完成，adapters-updated 事件天然覆盖（xdpool 等注册完会触发）。
+  // 兜底：启动后 3s 再跑一次，防宿主不派发该事件。
+  const preflightTimer = setTimeout(() => runPreflight('boot'), 3000);
 
   // 供 Client（经 remote RPC 或事件）读取运行态快照
   ctx.effect(() => {
@@ -519,12 +595,29 @@ export function apply(ctx) {
   // 曾经写成 on(name, { prepend: true }, fn)，于是 listener={prepend:true}、
   // options=真函数，钩子记录变成 { callback: {prepend:true} } —— dispatch 时
   // `hook.callback.bind` 必然抛 "is not a function"，而且熔断判定一次都没执行过。
+  ctx.logger?.info?.(
+    '[fallback-queue] attached: queue=%d p1Follow=%s enabled=%s',
+    (config.queue || []).length,
+    config.p1Follow,
+    config.enabled,
+  );
+
   ctx.effect(() =>
     ctx.on('agent/request-error', async (payload, next) => {
       const { provider, failure } = payload;
       // payload.agent 由 dsh-agent 的 agentEvents() fused 注入，运行时确实存在；
       // callConfig 不一定有（宿主没给），actualModel 是 agent/request 里记下的真实路由模型。
       const model = payload.agent?.callConfig?.model ?? lastProposal?.key?.split('\u0000')[1];
+      // 诊断日志：确认监听器真的被调用了、拿到了什么。用户报"完全没切换"时，
+      // 靠它区分"没执行到"和"执行了但判定不切"——这两种情况表现一样但修法完全不同。
+      ctx.logger?.info?.(
+        '[fallback-queue] request-error fired: provider=%s model=%s code=%s queue=%d lastProposal=%s',
+        provider,
+        model,
+        failure?.code,
+        (config.queue || []).length,
+        JSON.stringify(lastProposal),
+      );
       // 先把路由复原到"实际失败的那条"再判定归属：用户手动切到 P2/P3 后，队列里
       // 找不到匹配是常态，此时若按"未覆盖 = P1 的锅"处理，会把 P2/P3 的 429 记到
       // P1 头上，P1 无端熔断，P2/P3 反而永远健康、反复被选中。
@@ -539,6 +632,16 @@ export function apply(ctx) {
       }
       try {
         const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure);
+        // 诊断日志：判定结果。switched=false 时同时打出熔断态，便于看清是"全熔断"
+        // 还是"码不在立即列表"还是"路由不在队列里"。
+        ctx.logger?.info?.(
+          '[fallback-queue] decision: actual=%d p1Owns=%s switched=%s activeIndex=%d circuits=%s',
+          actual,
+          p1OwnsFailure,
+          switched,
+          router.runtime.activeIndex,
+          JSON.stringify(router.snapshot().entries.map((e) => `${e.index}:${e.state}`)),
+        );
         if (switched) return { kind: 'retry' };
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] request-error handling failed: %s', e?.message);
