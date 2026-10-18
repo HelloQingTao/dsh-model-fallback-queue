@@ -14,6 +14,206 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
+    // ---------- 双语文案表（跟随宿主语言：<html lang> / navigator.language） ----------
+
+    // 每次取词实时读语言，不在模块加载时缓存（切换语言后下一次渲染即跟随）
+    function localeId() {
+      const raw = (typeof document !== 'undefined' && document.documentElement && document.documentElement.lang)
+        || (typeof navigator !== 'undefined' && navigator.language) || 'en';
+      return String(raw).toLowerCase().startsWith('zh') ? 'zh' : 'en';
+    }
+
+    const TEXT = {
+      zh: {
+        addFallbackModel: '添加后备模型',
+        close: '关闭',
+        catalogLoadFailed: '模型目录加载失败：{err}',
+        catalogLoading: '加载模型目录…',
+        catalogEmpty: '没有可用模型目录',
+        added: ' · 已添加',
+        // 熔断三态
+        stateOk: '正常',
+        stateProbing: '探测中',
+        stateTripped: '熔断',
+        stateInvalid: '配置失效',
+        // 错误码释义：机器码是 key（不进表），这里只放释义文案
+        hintQuota: '额度或频率受限',
+        hintAccountQuota: '账号额度用尽',
+        hintRateLimit: '请求频率超限',
+        hintAuth: '鉴权失败（API Key 无效或过期）',
+        hintInvalidCredential: '鉴权失败（凭据无效）',
+        hintNoAdapter: '没有可用适配器（provider 未注册或模型不存在）',
+        hintUpstream: '上游错误（适配层未能识别）',
+        hintUnknown: '未知错误',
+        hintInvalidArgs: '请求参数不合法',
+        hintInvalidRequest: '请求不合法',
+        hintBadRequest: '请求不合法',
+        hintTimeout: '请求超时',
+        hintTransport: '链路中断',
+        unknown: '未知',
+        // 时长
+        durSeconds: '{n} 秒',
+        durMinutes: '{n} 分钟',
+        durMinSec: '{min} 分 {sec} 秒',
+        // 熔断 / 配置失效提示
+        infoInvalidConfig: '配置失效：这个 provider 没有注册适配器，或模型已不存在。\n重试不会恢复，请到设置页把这条换成可用的模型。',
+        infoNotSwitched: '本次未切换：{code}{hint}',
+        infoTrippedReason: '熔断原因：{code}{hint}',
+        infoCallerSide: '来源判定：请求本身或插件自身的问题，换模型也不会好，所以没有切换路由。',
+        infoRawError: '错误原文：{msg}',
+        infoModelReturned: '模型返回：{msg}',
+        infoHalfOpen: '当前状态：半开探测中，下一次请求会再试这条路由',
+        infoRecoverAt: '预计恢复：{time}（冷却 {cooldown} 后转半开探测）',
+        infoRecoverCooldown: '预计恢复：冷却 {cooldown} 后转半开探测',
+        infoRetryAfter: '上游建议：等待 {wait} 再试',
+        parenWrap: '（{text}）',
+        // 设置页
+        loading: '加载中…',
+        modeSticky: '粘滞（推荐）',
+        modeStickyDesc: '切到 P2 后 P2 可用就一直用，即使 P1 恢复也不切回；P2 也挂时才按邻近可用原则（含绕回 P1）',
+        modeProbe: '探测回切',
+        modeProbeDesc: 'P1 冷却到期后由下一个真实请求探测回 P1，成功留下失败回 P2（防抖 5 分钟）',
+        modeManual: '手动回切',
+        modeManualDesc: '切走后永不自动回 P1，需在芯片面板手动切回',
+        enableFailover: '启用故障转移',
+        saving: '保存中…',
+        queueTitle: '队列（P1 → Pn）',
+        queueEmpty: '队列为空：添加 P2/P3… 作为 P1（当前会话模型）的后备',
+        failuresSuffix: ' · 失败{n}',
+        alreadyTop: '已经是最高优先级',
+        moveUp: '上移',
+        alreadyBottom: '已经是最低优先级',
+        moveDown: '下移',
+        confirmRemove: '确认移除？',
+        remove: '移除',
+        cancel: '取消',
+        addModel: '+ 添加模型',
+        failbackStrategy: 'P1 恢复策略',
+        lastSwitchLabel: '最近切换：{from} → {to}{code}',
+        aboutDesc: '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。',
+        legend: '🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用',
+        aboutInfoHint: 'ⓘ 悬浮可看到熔断原因（模型返回的原文）与预计恢复时间',
+        // 输入框芯片
+        currentTag: '当前',
+        sessionModelUnknown: '当前会话模型',
+        sessionModelSuffix: '{name}（会话模型）',
+        failoverTitle: '模型故障转移',
+        badgeDisabled: '已关闭',
+        badgeAllTripped: '全部熔断',
+        badgeCurrent: '当前 {label}',
+        badgeSwitchedAway: '{label} 已失效，已切走',
+        noteNotQueued: '本轮请求未经过队列（放行原配置）',
+        noFallbacks: '暂无后备——到设置页添加 P2/P3…',
+        recentSwitch: '最近切换 {from} → {to}',
+        noSwitchRecord: '无切换记录',
+        failbackTitle: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
+        failbackAction: '切回 P1',
+        settings: '设置…',
+        slotLabel: '故障转移',
+        // 仅用于识别宿主内置「选择模型」按钮（DOM 匹配，不参与渲染）
+        selectModelAria: '选择模型',
+      },
+      en: {
+        addFallbackModel: 'Add fallback model',
+        close: 'Close',
+        catalogLoadFailed: 'Failed to load model catalog: {err}',
+        catalogLoading: 'Loading model catalog…',
+        catalogEmpty: 'No model catalog available',
+        added: ' · Added',
+        stateOk: 'OK',
+        stateProbing: 'Probing',
+        stateTripped: 'Tripped',
+        stateInvalid: 'Invalid config',
+        hintQuota: 'Rate or quota limited',
+        hintAccountQuota: 'Quota exhausted',
+        hintRateLimit: 'Rate limited',
+        hintAuth: 'Auth failed (invalid or expired API key)',
+        hintInvalidCredential: 'Auth failed (invalid credential)',
+        hintNoAdapter: 'No adapter available (provider not registered or model missing)',
+        hintUpstream: 'Upstream error (adapter could not classify)',
+        hintUnknown: 'Unknown error',
+        hintInvalidArgs: 'Invalid request arguments',
+        hintInvalidRequest: 'Invalid request',
+        hintBadRequest: 'Invalid request',
+        hintTimeout: 'Request timed out',
+        hintTransport: 'Connection interrupted',
+        unknown: 'Unknown',
+        durSeconds: '{n} s',
+        durMinutes: '{n} min',
+        durMinSec: '{min} min {sec} s',
+        infoInvalidConfig: 'Invalid config: this provider has no registered adapter, or the model no longer exists.\nRetrying will not help — replace this entry with a working model in settings.',
+        infoNotSwitched: 'Not switched: {code}{hint}',
+        infoTrippedReason: 'Circuit tripped: {code}{hint}',
+        infoCallerSide: 'Caller-side: the problem is in the request itself or in the plugin, so switching models would not help — the route was not changed.',
+        infoRawError: 'Raw error: {msg}',
+        infoModelReturned: 'Model returned: {msg}',
+        infoHalfOpen: 'Status: half-open probe — the next request will retry this route',
+        infoRecoverAt: 'Recovers at: {time} (half-open probe after {cooldown} cooldown)',
+        infoRecoverCooldown: 'Recovers after {cooldown} cooldown, then a half-open probe',
+        infoRetryAfter: 'Upstream advice: retry after {wait}',
+        parenWrap: ' ({text})',
+        loading: 'Loading…',
+        modeSticky: 'Sticky (recommended)',
+        modeStickyDesc: 'Once switched to P2, keep using P2 while it works — no failback even if P1 recovers; only when P2 also fails, fall back to the nearest available route (wrapping back to P1)',
+        modeProbe: 'Probe failback',
+        modeProbeDesc: 'After P1 cooldown expires, the next real request probes back to P1; stay on success, return to P2 on failure (5-minute debounce)',
+        modeManual: 'Manual failback',
+        modeManualDesc: 'Never fail back to P1 automatically; switch back manually from the chip panel',
+        enableFailover: 'Enable failover',
+        saving: 'Saving…',
+        queueTitle: 'Queue (P1 → Pn)',
+        queueEmpty: 'Queue is empty: add P2/P3… as fallbacks for P1 (the current session model)',
+        failuresSuffix: ' · {n} failures',
+        alreadyTop: 'Already the highest priority',
+        moveUp: 'Move up',
+        alreadyBottom: 'Already the lowest priority',
+        moveDown: 'Move down',
+        confirmRemove: 'Remove this route?',
+        remove: 'Remove',
+        cancel: 'Cancel',
+        addModel: '+ Add model',
+        failbackStrategy: 'P1 recovery strategy',
+        lastSwitchLabel: 'Last switch: {from} → {to}{code}',
+        aboutDesc: 'When a model in the queue fails (rate limited, quota exhausted, unavailable), the session automatically continues on the next available model. P1 is always the current session model; entries added to the queue are fallbacks (P2, P3…).',
+        legend: '🟢 OK · 🟡 Half-open, probing · 🔴 Tripped, cooling down · ⚪ Disabled',
+        aboutInfoHint: 'ⓘ Hover to see the circuit reason (the raw model output) and the estimated recovery time',
+        currentTag: 'Current',
+        sessionModelUnknown: 'Current session model',
+        sessionModelSuffix: '{name} (session model)',
+        failoverTitle: 'Model failover',
+        badgeDisabled: 'Disabled',
+        badgeAllTripped: 'All tripped',
+        badgeCurrent: 'Current {label}',
+        badgeSwitchedAway: '{label} failed, switched away',
+        noteNotQueued: 'This request did not go through the queue (original config passed through)',
+        noFallbacks: 'No fallbacks yet — add P2/P3… in settings',
+        recentSwitch: 'Last switch {from} → {to}',
+        noSwitchRecord: 'No switch history',
+        failbackTitle: 'Switch the active route back to P1 (the current session model under p1Follow)',
+        failbackAction: 'Switch back to P1',
+        settings: 'Settings…',
+        slotLabel: 'Failover',
+        selectModelAria: 'Select model',
+      },
+    };
+
+    function t(key, params) {
+      const table = TEXT[localeId()] || TEXT.en;
+      const template = table[key] ?? TEXT.en[key] ?? key;
+      if (!params) return template;
+      return template.replace(/\{(\w+)\}/g, (m, name) => (name in params ? String(params[name]) : m));
+    }
+
+    // DOM 匹配专用：一次拿到两种语言的写法（宿主语言未必等于当前渲染语言）
+    function tAll(key) {
+      return [TEXT.zh[key], TEXT.en[key]].filter((s) => typeof s === 'string' && s !== '');
+    }
+
+    // 把文案当字面量拼进正则时用
+    function escRe(s) {
+      return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
     const STICKY = 'sticky';
     const PROBE = 'probe';
     const MANUAL = 'manual';
@@ -152,18 +352,18 @@ window.__ModuleLoader__.load({
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               },
             },
-            '添加后备模型',
-            h('button', { onClick: onClose, style: btnSmall }, '关闭'),
+            t('addFallbackModel'),
+            h('button', { onClick: onClose, style: btnSmall }, t('close')),
           ),
           h(
             'div',
             { style: { overflowY: 'auto', padding: '6px 8px' } },
             err
-              ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, `模型目录加载失败：${err}`)
+              ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, t('catalogLoadFailed', { err }))
               : !groups
-                ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '加载模型目录…')
+                ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t('catalogLoading'))
                 : groups.length === 0
-                  ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '没有可用模型目录')
+                  ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t('catalogEmpty'))
                   : groups.map((g) =>
                       h(
                         'div',
@@ -205,7 +405,7 @@ window.__ModuleLoader__.load({
                                     onMouseEnter: (e) => { if (!inQueue) e.currentTarget.style.background = 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14'; },
                                     onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent'; },
                                   },
-                                  (m.name || m.id) + (inQueue ? ' · 已添加' : ''),
+                                  (m.name || m.id) + (inQueue ? t('added') : ''),
                                 );
                               }),
                             )
@@ -220,36 +420,37 @@ window.__ModuleLoader__.load({
     // ---------- 设置页 ----------
 
     const STATE_TONE = { closed: 'ok', half_open: 'warn', open: 'error' };
-    const STATE_TEXT = { closed: '正常', half_open: '探测中', open: '熔断' };
+    // 熔断三态 → 文案键（'closed'/'half_open'/'open' 是机器码，不翻译）
+    const STATE_KEY = { closed: 'stateOk', half_open: 'stateProbing', open: 'stateTripped' };
 
-    /** 熔断错误码的中文释义：叠在机器码之上，省得用户去查码表 */
-    const CODE_HINT = {
-      QUOTA: '额度或频率受限',
-      ACCOUNT_QUOTA: '账号额度用尽',
-      RATE_LIMIT: '请求频率超限',
-      AUTH: '鉴权失败（API Key 无效或过期）',
-      INVALID_CREDENTIAL: '鉴权失败（凭据无效）',
-      NO_ADAPTER: '没有可用适配器（provider 未注册或模型不存在）',
-      PI_AI_ERROR: '上游错误（适配层未能识别）',
-      UNKNOWN: '未知错误',
-      INVALID_ARGS: '请求参数不合法',
-      INVALID_REQUEST: '请求不合法',
-      BAD_REQUEST: '请求不合法',
-      TIMEOUT: '请求超时',
-      TRANSPORT: '链路中断',
+    /** 熔断错误码 → 释义文案键（key 保持机器码，释义文案在 TEXT 表里） */
+    const CODE_KEY = {
+      QUOTA: 'hintQuota',
+      ACCOUNT_QUOTA: 'hintAccountQuota',
+      RATE_LIMIT: 'hintRateLimit',
+      AUTH: 'hintAuth',
+      INVALID_CREDENTIAL: 'hintInvalidCredential',
+      NO_ADAPTER: 'hintNoAdapter',
+      PI_AI_ERROR: 'hintUpstream',
+      UNKNOWN: 'hintUnknown',
+      INVALID_ARGS: 'hintInvalidArgs',
+      INVALID_REQUEST: 'hintInvalidRequest',
+      BAD_REQUEST: 'hintBadRequest',
+      TIMEOUT: 'hintTimeout',
+      TRANSPORT: 'hintTransport',
     };
 
     /**
-     * 毫秒 → 中文短时长（"45 秒" / "2 分 30 秒"）。
+     * 毫秒 → 本地化短时长（zh「45 秒」「2 分 30 秒」/ en「45 s」「2 min 30 s」）。
      * @param {number} ms 毫秒
      * @returns {string}
      */
     function shortDuration(ms) {
       const total = Math.max(0, Math.round(Number(ms) / 1000));
-      if (total < 60) return `${total} 秒`;
+      if (total < 60) return t('durSeconds', { n: total });
       const min = Math.floor(total / 60);
       const sec = total % 60;
-      return sec === 0 ? `${min} 分钟` : `${min} 分 ${sec} 秒`;
+      return sec === 0 ? t('durMinutes', { n: min }) : t('durMinSec', { min, sec });
     }
 
     /**
@@ -273,31 +474,36 @@ window.__ModuleLoader__.load({
     function circuitInfoText(entry, snap) {
       if (!entry) return null;
       if (entry.invalid) {
-        return '配置失效：这个 provider 没有注册适配器，或模型已不存在。\n重试不会恢复，请到设置页把这条换成可用的模型。';
+        return t('infoInvalidConfig');
       }
       const err = entry.lastError || {};
       // 调用侧失败不熔断，但用户需要知道"为什么没切"：closed 状态下也给它提示。
       const callerSide = err.source === 'caller';
       if (entry.state === 'closed' && !callerSide) return null;
-      const hint = err.code ? CODE_HINT[err.code] : null;
+      const hintKey = err.code ? CODE_KEY[err.code] : null;
+      const hint = hintKey ? t(hintKey) : null;
+      const hintSuffix = hint ? t('parenWrap', { text: hint }) : '';
+      const code = err.code || t('unknown');
       const lines = callerSide
-        ? [`本次未切换：${err.code || '未知'}${hint ? `（${hint}）` : ''}`]
-        : [`熔断原因：${err.code || '未知'}${hint ? `（${hint}）` : ''}`];
+        ? [t('infoNotSwitched', { code, hint: hintSuffix })]
+        : [t('infoTrippedReason', { code, hint: hintSuffix })];
       if (callerSide) {
-        lines.push('来源判定：请求本身或插件自身的问题，换模型也不会好，所以没有切换路由。');
+        lines.push(t('infoCallerSide'));
       }
-      if (err.message) lines.push(`${callerSide ? '错误原文' : '模型返回'}：${err.message}`);
+      if (err.message) {
+        lines.push(callerSide ? t('infoRawError', { msg: err.message }) : t('infoModelReturned', { msg: err.message }));
+      }
       if (callerSide && entry.state === 'closed') {
         // 没进熔断，没有恢复时间可谈
       } else if (entry.state === 'half_open') {
-        lines.push('当前状态：半开探测中，下一次请求会再试这条路由');
+        lines.push(t('infoHalfOpen'));
       } else {
         const cooldown = Number(snap?.cooldownMs) > 0 ? Number(snap.cooldownMs) : 60000;
         lines.push(entry.recoverAt
-          ? `预计恢复：${clockText(entry.recoverAt)}（冷却 ${shortDuration(cooldown)} 后转半开探测）`
-          : `预计恢复：冷却 ${shortDuration(cooldown)} 后转半开探测`);
+          ? t('infoRecoverAt', { time: clockText(entry.recoverAt), cooldown: shortDuration(cooldown) })
+          : t('infoRecoverCooldown', { cooldown: shortDuration(cooldown) }));
         if (Number(entry.retryAfterMs) > 0) {
-          lines.push(`上游建议：等待 ${shortDuration(entry.retryAfterMs)} 再试`);
+          lines.push(t('infoRetryAfter', { wait: shortDuration(entry.retryAfterMs) }));
         }
       }
       return lines.join('\n');
@@ -339,8 +545,9 @@ window.__ModuleLoader__.load({
      */
     function entryText(entry) {
       if (!entry) return null;
-      if (entry.invalid) return '配置失效';
-      return STATE_TEXT[entry.state] || entry.state || null;
+      if (entry.invalid) return t('stateInvalid');
+      const key = STATE_KEY[entry.state];
+      return key ? t(key) : (entry.state || null);
     }
 
     function SettingsPage({ host }) {
@@ -362,7 +569,7 @@ window.__ModuleLoader__.load({
         refresh();
       }, [refresh]);
 
-      if (!cfg) return h('div', { style: { padding: 16 } }, '加载中…');
+      if (!cfg) return h('div', { style: { padding: 16 } }, t('loading'));
 
       const patch = async (p) => {
         setBusy(true);
@@ -398,9 +605,9 @@ window.__ModuleLoader__.load({
       };
 
       const modes = [
-        [STICKY, '粘滞（推荐）', '切到 P2 后 P2 可用就一直用，即使 P1 恢复也不切回；P2 也挂时才按邻近可用原则（含绕回 P1）'],
-        [PROBE, '探测回切', 'P1 冷却到期后由下一个真实请求探测回 P1，成功留下失败回 P2（防抖 5 分钟）'],
-        [MANUAL, '手动回切', '切走后永不自动回 P1，需在芯片面板手动切回'],
+        [STICKY, 'modeSticky', 'modeStickyDesc'],
+        [PROBE, 'modeProbe', 'modeProbeDesc'],
+        [MANUAL, 'modeManual', 'modeManualDesc'],
       ];
 
       return h(
@@ -410,20 +617,20 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { display: 'flex', alignItems: 'center', gap: 12 } },
-          h('strong', null, '启用故障转移'),
-          h(Switch, { checked: !!cfg.enabled, onChange: (v) => patch({ enabled: v }), label: '启用故障转移' }),
-          busy ? h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '保存中…') : null,
+          h('strong', null, t('enableFailover')),
+          h(Switch, { checked: !!cfg.enabled, onChange: (v) => patch({ enabled: v }), label: t('enableFailover') }),
+          busy ? h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t('saving')) : null,
         ),
         // 队列
         h(
           'div',
           null,
-          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, '队列（P1 → Pn）'),
+          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('queueTitle')),
           h(
             'div',
             { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
             cfg.queue.length === 0
-              ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, '队列为空：添加 P2/P3… 作为 P1（当前会话模型）的后备')
+              ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('queueEmpty'))
               : cfg.queue.map((r, i) => {
                   const entry = snap?.entries?.[i];
                   return h(
@@ -444,7 +651,7 @@ window.__ModuleLoader__.load({
                     h('strong', { style: { width: 28 } }, cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`),
                     h('span', { style: { flex: 1, fontSize: 13 } }, `${r.provider} / ${r.model}`),
                     entry
-                      ? h(Badge, { tone: entryTone(entry) }, `${entryText(entry)}${entry.failures ? ` · 失败${entry.failures}` : ''}`)
+                      ? h(Badge, { tone: entryTone(entry) }, `${entryText(entry)}${entry.failures ? t('failuresSuffix', { n: entry.failures }) : ''}`)
                       : null,
                     circuitInfoIcon(entry, snap),
                     h(
@@ -452,8 +659,8 @@ window.__ModuleLoader__.load({
                       {
                         onClick: () => move(i, -1),
                         disabled: i === 0,
-                        title: i === 0 ? '已经是最高优先级' : '上移',
-                        'aria-label': '上移',
+                        title: i === 0 ? t('alreadyTop') : t('moveUp'),
+                        'aria-label': t('moveUp'),
                         style: i === 0 ? btnSmallDisabled : btnSmall,
                       },
                       '↑',
@@ -463,33 +670,33 @@ window.__ModuleLoader__.load({
                       {
                         onClick: () => move(i, 1),
                         disabled: i === cfg.queue.length - 1,
-                        title: i === cfg.queue.length - 1 ? '已经是最低优先级' : '下移',
-                        'aria-label': '下移',
+                        title: i === cfg.queue.length - 1 ? t('alreadyBottom') : t('moveDown'),
+                        'aria-label': t('moveDown'),
                         style: i === cfg.queue.length - 1 ? btnSmallDisabled : btnSmall,
                       },
                       '↓',
                     ),
                     confirmRemove === i
                       ? h('span', { style: { display: 'flex', gap: 4, alignItems: 'center' } },
-                          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, '确认移除？'),
-                          h('button', { onClick: () => { setConfirmRemove(null); remove(i); }, style: { ...btnSmall, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, '移除'),
-                          h('button', { onClick: () => setConfirmRemove(null), style: btnSmall }, '取消'),
+                          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, t('confirmRemove')),
+                          h('button', { onClick: () => { setConfirmRemove(null); remove(i); }, style: { ...btnSmall, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, t('remove')),
+                          h('button', { onClick: () => setConfirmRemove(null), style: btnSmall }, t('cancel')),
                         )
-                      : h('button', { onClick: () => setConfirmRemove(i), style: btnSmall }, '移除'),
+                      : h('button', { onClick: () => setConfirmRemove(i), style: btnSmall }, t('remove')),
                   );
                 }),
           ),
-          h('button', { onClick: add, style: { ...btnSmall, marginTop: 8 } }, '+ 添加模型'),
+          h('button', { onClick: add, style: { ...btnSmall, marginTop: 8 } }, t('addModel')),
         ),
         // 回切策略
         h(
           'div',
           null,
-          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, 'P1 恢复策略'),
+          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('failbackStrategy')),
           h(
             'div',
             { role: 'radiogroup', style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-            modes.map(([value, title, desc]) =>
+            modes.map(([value, titleKey, descKey]) =>
               h(
                 'label',
                 {
@@ -512,8 +719,8 @@ window.__ModuleLoader__.load({
                 h(
                   'span',
                   null,
-                  h('div', { style: { fontSize: 13, fontWeight: 600 } }, title),
-                  h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, desc),
+                  h('div', { style: { fontSize: 13, fontWeight: 600 } }, t(titleKey)),
+                  h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t(descKey)),
                 ),
               ),
             ),
@@ -525,7 +732,11 @@ window.__ModuleLoader__.load({
               'div',
               { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
               // 位置 → 显示名：p1Follow 下 -1 = P1、队列下标 i = P{i+2}；静态模式 i = P{i+1}
-              `最近切换：${snap.lastSwitch.from < 0 ? 'P1' : `P${snap.lastSwitch.from + (snap.p1Follow ? 2 : 1)}`} → ${snap.lastSwitch.to < 0 ? 'P1' : `P${snap.lastSwitch.to + (snap.p1Follow ? 2 : 1)}`}${snap.lastSwitch.code ? `（${snap.lastSwitch.code}）` : ''}`,
+              t('lastSwitchLabel', {
+                from: snap.lastSwitch.from < 0 ? 'P1' : `P${snap.lastSwitch.from + (snap.p1Follow ? 2 : 1)}`,
+                to: snap.lastSwitch.to < 0 ? 'P1' : `P${snap.lastSwitch.to + (snap.p1Follow ? 2 : 1)}`,
+                code: snap.lastSwitch.code ? t('parenWrap', { text: snap.lastSwitch.code }) : '',
+              }),
             )
           : null,
         pickerOpen
@@ -553,9 +764,9 @@ window.__ModuleLoader__.load({
               opacity: 0.65,
             },
           },
-          h('div', null, '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。'),
-          h('div', { style: { marginTop: 2 } }, '🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用'),
-          h('div', { style: { marginTop: 2 } }, 'ⓘ 悬浮可看到熔断原因（模型返回的原文）与预计恢复时间'),
+          h('div', null, t('aboutDesc')),
+          h('div', { style: { marginTop: 2 } }, t('legend')),
+          h('div', { style: { marginTop: 2 } }, t('aboutInfoHint')),
         ),
       );
     }
@@ -590,23 +801,32 @@ window.__ModuleLoader__.load({
       // 实际路由的模型，盲目跟随会把 P1 行（会话模型）显示成 P3 的模型。
       // lastUncoveredName 只在本会话未被覆盖（未切走）时更新 = 用户真正手选的名字；
       // 切走期间显示冻结值，切回 P1 后恢复跟随。
-      const [sessionModelLabel, setSessionModelLabel] = React.useState('当前会话模型');
+      const [sessionModelLabel, setSessionModelLabel] = React.useState(null); // null = 尚未从 DOM 解析到，语言无关的哨兵（不拿文案当哨兵）
       const [lastUncoveredName, setLastUncoveredName] = React.useState(null);
       const rootRef = React.useRef(null);
       // DOM 取名函数存一份引用：点开弹层时要立刻重读一次，不能等 3s 轮询。
       const pullLabelRef = React.useRef(null);
 
-      // 从内置模型选择按钮 title 解析当前会话模型名（title 形如「选择模型，当前 GLM-5.3-Flash · x0.06，推理等级 Default」）
+      // 从内置模型选择按钮 title 解析当前会话模型名。识别要中英双兼容（大小写不敏感）：
+      // 中文 title 形如「选择模型，当前 GLM-5.3-Flash · x0.06，推理等级 Default」，
+      // 英文 aria-label 形如「Select model, current GLM-5.3-Flash」。
       React.useEffect(() => {
         const pull = () => {
+          const pickNames = tAll('selectModelAria').map((s) => s.toLowerCase());
           const btn = Array.from(document.querySelectorAll('button')).find((x) => {
-            const t = x.title || x.getAttribute('aria-label') || '';
-            return t.includes('选择模型') || /^(.+?)\s*·/.test(t) && x.getAttribute('aria-label')?.includes('选择模型');
+            // aria-label 是宿主稳定给出的「选择模型，当前 X」/「Select model, current X」，
+            // 中英两套都认；title 只在有推理等级时才带「·」，不能只靠它，否则没有推理等级
+            // 的模型（title 就是纯模型名）会被漏掉，DOM 兜底名一直取不到。
+            const tip = String(x.title || '').toLowerCase();
+            const aria = String(x.getAttribute('aria-label') || '').toLowerCase();
+            return pickNames.some((s) => aria.includes(s) || tip.includes(s));
           });
-          // aria-label 形如「选择模型，当前 X，推理等级 Y」；title 形如「X · Y」
+          // aria-label 形如「选择模型，当前 X，推理等级 Y」/「Select model, current X」；title 形如「X · Y」
           const al = btn?.getAttribute('aria-label') || '';
           const ti = btn?.title || '';
-          const m = al.match(/当前 ([^·,，，]+)/) || ti.match(/^(.+?)\s*·/) || ti.match(/^([^·]+)/);
+          // 「当前/current」两种语言都试；中文分支的正则与原来逐字等价（全角逗号写成转义，避免表外中文）
+          const curRe = new RegExp(`(?:${tAll('currentTag').map(escRe).join('|')}) ([^·,\uFF0C]+)`, 'i');
+          const m = al.match(curRe) || ti.match(/^(.+?)\s*·/) || ti.match(/^([^·]+)/);
           if (!m) return;
           const next = m[1].trim();
           // 只在值真的变化时才写 state：无条件 setState 会让组件每 3 秒重渲染一次，
@@ -615,8 +835,8 @@ window.__ModuleLoader__.load({
         };
         pullLabelRef.current = pull;
         pull();
-        const t = setInterval(pull, 3000);
-        return () => clearInterval(t);
+        const domTimer = setInterval(pull, 3000);
+        return () => clearInterval(domTimer);
       }, []);
 
       const enabled = snap?.enabled;
@@ -654,7 +874,7 @@ window.__ModuleLoader__.load({
       // 导致整个芯片被错误边界摘掉）。
       React.useEffect(() => {
         const covered = Number.isInteger(myInFlight) && myInFlight > 0;
-        if (!covered && sessionModelLabel && sessionModelLabel !== '当前会话模型') {
+        if (!covered && sessionModelLabel) {
           setLastUncoveredName((prev) => (prev === sessionModelLabel ? prev : sessionModelLabel));
         }
       }, [myInFlight, sessionModelLabel]);
@@ -670,7 +890,8 @@ window.__ModuleLoader__.load({
       const p1DisplayName = hostSessionModelName
         || ((Number.isInteger(myInFlight) && myInFlight > 0 && lastUncoveredName)
           ? lastUncoveredName
-          : sessionModelLabel);
+          : sessionModelLabel)
+        || t('sessionModelUnknown');
 
       React.useEffect(() => {
         let alive = true;
@@ -757,7 +978,7 @@ window.__ModuleLoader__.load({
 
       const routeOf = (idx) => {
         // P1 槽（p1Follow 下 = -1）就是会话模型；静态模式下 P1 = 队列第一条
-        if (p1Follow ? idx < 0 : idx === 0) return `${p1DisplayName}（会话模型）`;
+        if (p1Follow ? idx < 0 : idx === 0) return t('sessionModelSuffix', { name: p1DisplayName });
         const e = entries.find((x) => x.index === idx);
         return e ? `${e.provider} / ${e.model}` : '—';
       };
@@ -786,8 +1007,8 @@ window.__ModuleLoader__.load({
           'button',
           {
             onClick: () => setOpen((v) => !v),
-            title: '模型故障转移',
-            'aria-label': '模型故障转移',
+            title: t('failoverTitle'),
+            'aria-label': t('failoverTitle'),
             style: {
               position: 'relative',
               width: 26,
@@ -847,12 +1068,12 @@ window.__ModuleLoader__.load({
                     justifyContent: 'space-between',
                   },
                 },
-                '模型故障转移',
+                t('failoverTitle'),
                 !enabled
-                  ? h(Badge, { tone: 'muted' }, '已关闭')
+                  ? h(Badge, { tone: 'muted' }, t('badgeDisabled'))
                   : allOpen
-                    ? h(Badge, { tone: 'error' }, '全部熔断')
-                    : h(Badge, { tone: p1Active ? 'ok' : 'warn' }, `当前 ${lbl(effective)}`),
+                    ? h(Badge, { tone: 'error' }, t('badgeAllTripped'))
+                    : h(Badge, { tone: p1Active ? 'ok' : 'warn' }, t('badgeCurrent', { label: lbl(effective) })),
               ),
               // 实际在跑的路由：这块是"看报错就知道是谁的锅"的关键——
               // 指示器显示的不是你手选的模型，而是这一轮真实请求发去了哪里。
@@ -870,11 +1091,11 @@ window.__ModuleLoader__.load({
                 // 「已失效，已切走」只在真实熔断时显示：当前已不在 P1（p1Follow 下 -1 才是 P1）
                 // 且 P1 自己的熔断器非 closed。P1 健康时哪怕游标停在别处也不能喊"已失效"。
                 !activeIsP1 && p1Leaning
-                  ? h('div', { style: { opacity: 0.75 } }, `${lbl(active)} 已失效，已切走`)
+                  ? h('div', { style: { opacity: 0.75 } }, t('badgeSwitchedAway', { label: lbl(active) }))
                   : null,
                 // -1 在 p1Follow 下就是 P1（正常），不能说成"未经过队列"
                 !p1Follow && inFlight < 0 && enabled
-                  ? h('div', { style: { opacity: 0.75 } }, '本轮请求未经过队列（放行原配置）')
+                  ? h('div', { style: { opacity: 0.75 } }, t('noteNotQueued'))
                   : null,
               ),
               // 队列条目
@@ -890,15 +1111,15 @@ window.__ModuleLoader__.load({
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
                   h('span', { style: { flex: 1, opacity: p1Active ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                    p1DisplayName + (p1Follow ? '（会话模型）' : '')),
+                    p1Follow ? t('sessionModelSuffix', { name: p1DisplayName }) : p1DisplayName),
                   p1Active
-                    ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
+                    ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                     : null,
-                  h(Badge, { tone: entryTone(p1Entry) || 'ok' }, entryText(p1Entry) || '正常'),
+                  h(Badge, { tone: entryTone(p1Entry) || 'ok' }, entryText(p1Entry) || t('stateOk')),
                   circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0
-                  ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '暂无后备——到设置页添加 P2/P3…')]
+                  ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t('noFallbacks'))]
                   : entries.map((e) => {
                       // 队列下标就是生效位置，直接比（p1Follow 下 e.index===0 是 P2，不再排除）
                       const isActive = effective === e.index;
@@ -919,7 +1140,7 @@ window.__ModuleLoader__.load({
                         h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),
                         h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
                         isActive
-                          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, '当前')
+                          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                           : null,
                         h(Badge, { tone: entryTone(e) || 'muted' }, entryText(e) || e.state),
                         circuitInfoIcon(e, snap),
@@ -942,8 +1163,8 @@ window.__ModuleLoader__.load({
                 },
                 // from===to 是空操作（老宿主会记），不显示成"P2 → P2"
                 snap?.lastSwitch && snap.lastSwitch.from !== snap.lastSwitch.to
-                  ? `最近切换 ${lbl(snap.lastSwitch.from)} → ${lbl(snap.lastSwitch.to)}`
-                  : '无切换记录',
+                  ? t('recentSwitch', { from: lbl(snap.lastSwitch.from), to: lbl(snap.lastSwitch.to) })
+                  : t('noSwitchRecord'),
                 h(
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: 6 } },
@@ -953,7 +1174,7 @@ window.__ModuleLoader__.load({
                         'button',
                         {
                           onClick: failback,
-                          title: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
+                          title: t('failbackTitle'),
                           style: {
                             fontSize: 11,
                             padding: '3px 10px',
@@ -965,7 +1186,7 @@ window.__ModuleLoader__.load({
                           },
                         },
                         // 只有不在 P1 时才显示按钮：已在 P1 跟随再给"切回"就自相矛盾
-                        '切回 P1',
+                        t('failbackAction'),
                       )
                     : null,
                   onOpenSettings
@@ -983,7 +1204,7 @@ window.__ModuleLoader__.load({
                             cursor: 'pointer',
                           },
                         },
-                        '设置…',
+                        t('settings'),
                       )
                     : null,
                 ),
@@ -1184,7 +1405,7 @@ window.__ModuleLoader__.load({
 
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'dsh-model-fallback-queue', order: 60, label: '故障转移' },
+            { name: 'settings.section', id: 'dsh-model-fallback-queue', order: 60, label: t('slotLabel') },
             () => SettingsPage({ host, onOpenSettings: null }),
           ),
         );

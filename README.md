@@ -24,6 +24,7 @@
 - **输入框状态芯片**：显示当前生效路由与健康状态，全熔断时是红色「全部熔断」徽章；展开是队列面板，可「切回 P1」或跳到设置页。
 - **全熔断降级放行**：所有路由都不可用时按原配置放行，插件不拦截请求。
 - **不抢同路由重试的活**：非致命错误一律放行，退避重试仍由 dsh-llm-retry 负责。
+- **界面中英双语**：所有界面文案跟随 DSH 的语言设置，自动在中文 / English 之间切换。
 
 ### 效果图
 
@@ -117,6 +118,7 @@ When your current model hits its quota, gets rate-limited or becomes unavailable
 - **Input-box status chip.** Shows the active route and its health, a red “all tripped” badge when nothing is left; expand it for the queue panel with a “Back to P1” action and a settings shortcut.
 - **Degrades safely.** When every route is tripped the original config is passed through untouched — the plugin never blocks a request.
 - **Does not fight same-route retries.** Non-fatal errors are always passed through; backoff retries stay with dsh-llm-retry.
+- **Bilingual UI.** Every label follows the DSH language setting and switches between 中文 and English automatically.
 
 ### Screenshots
 
