@@ -284,6 +284,15 @@ function createRouter(config, log) {
     staleHalfOpen,
     PROBE_TIMEOUT_MS,
     sessionCursor,
+    /**
+     * 记录「某会话最近一次实际发出去的路由」（-1 = 本次未覆盖，放行原配置）。
+     * 必须经 router 暴露：setInFlight 是 createRouter 的闭包，apply 半区看不到它
+     * —— 直接裸调用会 ReferenceError（agent/request 钩子整轮抛错，表现为
+     * 每次发消息都「本轮运行失败 setInFlight is not defined」）。
+     */
+    setInFlight,
+    /** 读某会话的实际路由（无会话上下文回退全局值） */
+    inFlightFor,
     /** 清空所有会话游标（手动回切/会话清理用）；返回清除的条数 */
     resetSessionCursors() {
       const n = sessionCursor.size;
@@ -768,7 +777,7 @@ export function apply(ctx, llm) {
         const idx = router.resolveIndex(undefined, sessionId);
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
-          setInFlight(sessionId, -1);
+          router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
           return cfg;
         }
@@ -781,7 +790,7 @@ export function apply(ctx, llm) {
           const actual = actualRouteOf(cfg.provider, cfg.model);
           runtimePin(actual);
           // UI 显示的是"实际在跑的这条"：用户手选了队列外的模型就是 -1（P1 跟随）
-          setInFlight(sessionId, actual);
+          router.setInFlight(sessionId, actual);
           router.runtime.lastProposal = { ...lastProposal };
           router.touch();
           return cfg;
@@ -789,19 +798,19 @@ export function apply(ctx, llm) {
         const route = config.queue[idx];
         if (!route) {
           lastProposal = null;
-          setInFlight(sessionId, -1);
+          router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
           return cfg;
         }
         lastProposal = { key: router.keyOf(route), idx, overridden: true };
-        setInFlight(sessionId, idx);
+        router.setInFlight(sessionId, idx);
         router.runtime.lastProposal = { ...lastProposal };
         router.touch();
         return { ...cfg, provider: route.provider, model: route.model };
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
         lastProposal = null;
-        setInFlight(sessionId, -1);
+        router.setInFlight(sessionId, -1);
         router.runtime.lastProposal = null;
         return cfg;
       }
