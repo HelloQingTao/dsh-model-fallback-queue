@@ -565,7 +565,9 @@ window.__ModuleLoader__.load({
 
     // ---------- 输入框芯片 ----------
 
-    function Chip({ host, onOpenSettings }) {
+    function Chip(props) {
+      const host = props.host;
+      const onOpenSettings = props.onOpenSettings;
       const [snap, setSnap] = React.useState(null);
       const [open, setOpen] = React.useState(false);
       const [sessionModelLabel, setSessionModelLabel] = React.useState('当前会话模型');
@@ -639,8 +641,17 @@ window.__ModuleLoader__.load({
       const active = snap?.activeIndex ?? 0;
       // 失效路由游标（activeIndex）表示"已经挂了、等下一级替换"，它会一直停在坏掉的那条；
       // 用户要看的却是"这一轮实际跑在哪条"。inFlightIndex 才是后者，缺省时退回旧字段。
-      const inFlight = Number.isInteger(snap?.inFlightIndex) ? snap.inFlightIndex : active;
-      const effective = Number.isInteger(snap?.effectiveIndex) ? snap.effectiveIndex : inFlight;
+      // 会话隔离：slot 组件由宿主按会话渲染（scope:'session'），props.sessionId 是当前
+      // 会话。优先取 per-session inFlight 映射，避免另一个会话的切换覆盖本会话的显示。
+      const myInFlight = props.sessionId !== undefined
+        && snap?.sessionInFlight
+        && Number.isInteger(snap.sessionInFlight[props.sessionId])
+        ? snap.sessionInFlight[props.sessionId]
+        : undefined;
+      const inFlight = myInFlight !== undefined ? myInFlight
+        : Number.isInteger(snap?.inFlightIndex) ? snap.inFlightIndex : active;
+      const effective = myInFlight !== undefined ? myInFlight
+        : Number.isInteger(snap?.effectiveIndex) ? snap.effectiveIndex : inFlight;
       const p1Follow = snap?.p1Follow ?? true;
       // 会话模型快照（宿主侧只在 P1 真实放行时采样）：P1 指的用户手选模型，
       // 不随熔断切走而变化。空 = 本会话尚无采样点（插件刚装/队列关闭过）。
@@ -1106,7 +1117,9 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('conversation.input.right', () =>
           ctx.slots.register(
             { name: 'conversation.input.right', id: 'dsh-model-fallback-queue-chip', order: 20 },
-            () => Chip({ host }),
+            // slot 是 session scope：宿主渲染时把当前会话的 sessionId 等标准 props 传进来，
+            // 原样透传给 Chip（Chip 里读 props.sessionId 取 per-session inFlight）。
+            (slotProps) => Chip({ ...slotProps, host }),
           ),
         );
     }
