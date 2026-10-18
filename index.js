@@ -122,6 +122,29 @@ function createRouter(config, log) {
     revision: 0, // 状态版本号，客户端据此判断是否需要重新拉 snapshot
     probeInFlight: false,
   };
+  // ---- 会话隔离的切换游标 ----
+  // 熔断状态（circuits）和配置判死（health）按 provider/model 记账，天然跨会话共享
+  // ——同一个模型在哪都坏，这合理。但"切到第几级"是会话体验：会话1熔断切到 P2，
+  // 不该把会话2（还没请求过）也拖到 P2。游标按 sessionId 记，activeIndex 只作
+  // 无会话上下文时的回退（旧调用/探测/手动回切）。
+  const sessionCursor = new Map(); // sessionId -> index
+  function cursorFor(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return runtime; // 无会话上下文 → 全局回退
+    const cur = sessionCursor.get(sessionId);
+    // 未记录的会话一律从 P1（0）起步：新会话不该继承别的会话的切换进度。
+    // 全局 activeIndex 只反映"曾经有会话切过多深"，供探测/预检选起点，不污染新会话。
+    if (cur === undefined) return { activeIndex: 0 };
+    return { activeIndex: cur }; // 只读视图，写经 setCursor
+  }
+  function setCursor(sessionId, idx) {
+    if (typeof sessionId !== 'string' || !sessionId) {
+      runtime.activeIndex = idx;
+      return;
+    }
+    sessionCursor.set(sessionId, idx);
+    // 全局游标记录历史最深切换（探测/预检等无会话路径用它选起点）
+    if (idx > runtime.activeIndex) runtime.activeIndex = idx;
+  }
 
   /** 任何会改变运行态/电路的操作都应调用它：bump 版本号 → 通知客户端拉新快照 */
   function touch() {
@@ -243,6 +266,18 @@ function createRouter(config, log) {
     pickFrom,
     staleHalfOpen,
     PROBE_TIMEOUT_MS,
+    sessionCursor,
+    /** 清空所有会话游标（手动回切/会话清理用）；返回清除的条数 */
+    resetSessionCursors() {
+      const n = sessionCursor.size;
+      sessionCursor.clear();
+      if (n) touch();
+      return n;
+    },
+    /** 会话结束（session/disposed）后清掉它的游标，防 Map 无限增长 */
+    dropSession(sessionId) {
+      if (sessionCursor.delete(sessionId)) touch();
+    },
     health,
     HEALTH,
     /**
@@ -288,10 +323,10 @@ function createRouter(config, log) {
       return { checked: queue.length, invalid, changed };
     },
     /** 选出本次请求应使用的队列索引；返回 -1 表示队列不可用（放行原配置） */
-    resolveIndex(now = Date.now()) {
+    resolveIndex(now = Date.now(), sessionId = null) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return -1;
-      const cur = Math.min(runtime.activeIndex, queue.length - 1);
+      const cur = Math.min(cursorFor(sessionId).activeIndex, queue.length - 1);
       if (isAvailable(queue[cur], now)) return cur;
       // 当前路由不可用 → 找下一个可用
       const sticky = config.failbackMode === 'sticky';
@@ -306,7 +341,7 @@ function createRouter(config, log) {
           to: chosen,
           at: Date.now(),
         };
-        runtime.activeIndex = chosen;
+        setCursor(sessionId, chosen);
         touch();
       }
       return chosen;
@@ -319,7 +354,7 @@ function createRouter(config, log) {
      * failure：宿主给的失败事实（LlmFailure），带上它才能把上游原文与建议等待时长
      * 一起记进电路，供 UI 的熔断原因悬浮提示展示。
      */
-    onFailedAttempt(provider, model, code, p1OwnsFailure = true, failure = null) {
+    onFailedAttempt(provider, model, code, p1OwnsFailure = true, failure = null, sessionId = null) {
       const queue = config.queue || [];
       if (!config.enabled || queue.length === 0) return false;
       let idx = queue.findIndex((r) => r.provider === provider && r.model === model);
@@ -333,9 +368,9 @@ function createRouter(config, log) {
       // 用户手动选了 P3、P3 挂了，游标还停在 P2，resolveIndex() 会认为 P2 正常并
       // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
       // 挂掉的这条，同样切不出去。
-      runtime.activeIndex = idx;
+      setCursor(sessionId, idx);
       recordFailure(queue[idx], code, failure?.message, failure?.providerRetryAfterMs);
-      const nextIdx = this.resolveIndex();
+      const nextIdx = this.resolveIndex(undefined, sessionId);
       if (nextIdx === -1 || nextIdx === idx) {
         touch(); // 熔断已记下，指标变了，通知一次
         return false; // 全熔断或仍在原路由：不重试
@@ -452,12 +487,14 @@ class FallbackQueueService extends TypertRemoteService {
     return { ok: true };
   }
 
-  /** 手动回切：把 activeIndex 拉回指定索引（默认 P1=0） */
+  /** 手动回切：把所有会话游标与全局游标拉回指定索引（默认 P1=0） */
   manualFailback(index) {
     const i = Number.isFinite(index) ? index : 0;
     const route = this.config.queue?.[i];
     if (!route) return { ok: false };
     const from = this.router.runtime.activeIndex;
+    // 手动回切是明确的全局意图：清掉所有会话游标，全部回到指定索引
+    this.router.resetSessionCursors();
     this.router.runtime.activeIndex = i;
     // 手动回切后 UI 立刻应显示 P1，而不是继续显示上次失败的路由
     this.router.runtime.inFlightIndex = i;
@@ -602,6 +639,16 @@ export function apply(ctx, llm) {
     }),
   );
 
+  // ---- 会话数据清理 ----
+  // 会话销毁（session/disposed，宿主 dsh-session 派发）时清掉它的切换游标，
+  // 防止 sessionCursor Map 随历史会话数无限增长。游标是我们唯一按会话记的运行态；
+  // 熔断/判死按 provider/model 记账，与会话无关，不需要清理。
+  ctx.effect(() =>
+    ctx.on('session/disposed', (session) => {
+      router.dropSession(session?.id);
+    }),
+  );
+
   // ---- 主动探测：半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，
   // 由插件直接经 llm.stream 发一条微型请求（maxTokens=1），首个 chunk 到达即算
   // 成功。否则"探测中"会永远挂着——没有新请求就没有人去试这条路由。
@@ -686,8 +733,10 @@ export function apply(ctx, llm) {
       // 拿到的是 undefined，会把整轮请求的 provider/model 变成空的。真出异常就让
       // prepareRequest 抛 —— agent-loop 会把它当成一个正常失败（UNKNOWN）吞掉。
       const cfg = await next();
+      // 会话隔离：游标按会话记。payload.agent 由 agentEvents() fused 注入，session.id 可用
+      const sessionId = payload?.agent?.session?.id ?? null;
       try {
-        const idx = router.resolveIndex();
+        const idx = router.resolveIndex(undefined, sessionId);
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
           router.runtime.inFlightIndex = -1;
@@ -777,7 +826,9 @@ export function apply(ctx, llm) {
         }
       }
       try {
-        const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure, failure);
+        // 会话隔离：切换游标按会话记（payload.agent 由 agentEvents() fused 注入）
+        const sessionId = payload?.agent?.session?.id ?? null;
+        const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure, failure, sessionId);
         // 诊断日志：判定结果。switched=false 时同时打出熔断态，便于看清是"全熔断"
         // 还是"码不在立即列表"还是"路由不在队列里"。
         ctx.logger?.info?.(
