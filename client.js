@@ -108,10 +108,32 @@ window.__ModuleLoader__.load({
         noSwitchRecord: '无切换记录',
         failbackTitle: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
         failbackAction: '切回 P1',
+        clickToSwitch: '点击切换到 {label}',
+        p1PickModel: '点击更换当前会话模型（即 P1）',
         settings: '设置…',
         slotLabel: '故障转移',
         // 仅用于识别宿主内置「选择模型」按钮（DOM 匹配，不参与渲染）
         selectModelAria: '选择模型',
+        // F2 大保底 / F3 免费付费 / F4 探测 —— 双语键
+        pinLast: '设为最后兜底（大保底）',
+        unpin: '取消大保底',
+        pinnedTag: '大保底',
+        paidFree: '免费',
+        paidPaid: '付费',
+        paidUnknown: '未标注',
+        setPaidFree: '标为免费',
+        setPaidPaid: '标为付费',
+        setPaidUnknown: '清除标记',
+        probeAll: '探测全部',
+        probingAll: '探测中… {done}/{total}',
+        probeAllDone: '探测完成：{ok} 可用 / {fail} 不可用',
+        pickerAddN: '添加 {n} 个到队列',
+        pickerTierHeader: '厂商：{name}',
+        pickerNoneSelected: '请先勾选至少一个模型',
+        pingInterval: '周期健康探测间隔（毫秒，0=关闭）',
+        pingSkipPaid: '周期探测跳过付费模型（省配额）',
+        pingCostWarn: '⚠ 周期探测会向模型发送真实请求，可能消耗配额/费用；付费模型默认跳过，可在下方关闭跳过',
+        queueRowHint: '📌=最后兜底（大保底）· ●绿=免费 ●琥珀=付费',
       },
       en: {
         addFallbackModel: 'Add fallback model',
@@ -191,9 +213,31 @@ window.__ModuleLoader__.load({
         noSwitchRecord: 'No switch history',
         failbackTitle: 'Switch the active route back to P1 (the current session model under p1Follow)',
         failbackAction: 'Switch back to P1',
+        clickToSwitch: 'Click to switch to {label}',
+        p1PickModel: 'Click to change the session model (P1)',
         settings: 'Settings…',
         slotLabel: 'Failover',
         selectModelAria: 'Select model',
+        // F2 大保底 / F3 免费付费 / F4 探测 —— 双语键
+        pinLast: 'Pin as last-resort (safety net)',
+        unpin: 'Unpin (not last-resort)',
+        pinnedTag: 'Safety net',
+        paidFree: 'Free',
+        paidPaid: 'Paid',
+        paidUnknown: 'Unmarked',
+        setPaidFree: 'Mark as free',
+        setPaidPaid: 'Mark as paid',
+        setPaidUnknown: 'Clear mark',
+        probeAll: 'Probe all',
+        probingAll: 'Probing… {done}/{total}',
+        probeAllDone: 'Probe done: {ok} ok / {fail} unavailable',
+        pickerAddN: 'Add {n} to queue',
+        pickerTierHeader: 'Vendor: {name}',
+        pickerNoneSelected: 'Check at least one model first',
+        pingInterval: 'Periodic health probe interval (ms, 0 = off)',
+        pingSkipPaid: 'Skip paid models in periodic probes (saves quota)',
+        pingCostWarn: '⚠ Periodic probing sends real requests to models and may use quota/charges; paid models are skipped by default, disable the skip below to include them',
+        queueRowHint: '📌 = last-resort (safety net) · ●green=free ●amber=paid',
       },
     };
 
@@ -285,10 +329,13 @@ window.__ModuleLoader__.load({
 
     // ---------- 模型选择器（数据来自 remote.session.modelCatalog，同内置模型选择器） ----------
 
-    function ModelPicker({ onClose, onPick, existing = [] }) {
+    function ModelPicker({ onClose, onConfirm, existing = [] }) {
       const [groups, setGroups] = React.useState(null);
       const [err, setErr] = React.useState(null);
       const [openProvider, setOpenProvider] = React.useState(null);
+      // F1 勾选集合：key = `${group.id}/${model.id}` → true/false（批量提交）
+      const [checked, setChecked] = React.useState({});
+      const [submitErr, setSubmitErr] = React.useState(null);
       const rootRef = React.useRef(null);
 
       React.useEffect(() => {
@@ -319,6 +366,35 @@ window.__ModuleLoader__.load({
           document.removeEventListener('keydown', onKey, true);
         };
       }, [onClose]);
+
+      // 勾选/取消勾选一个模型行（已入队的不可取消）
+      const toggle = (gid, mid) => {
+        setChecked((prev) => {
+          const key = `${gid}/${mid}`;
+          const next = { ...prev };
+          if (next[key]) delete next[key];
+          else next[key] = true;
+          return next;
+        });
+      };
+
+      // 提交勾选集合：按「先厂商、后组内序」展开成 entries 交给父级追加进队列
+      const confirm = () => {
+        const selected = [];
+        for (const g of groups || []) {
+          for (const m of g.models || []) {
+            if (!m) continue;
+            if (checked[`${g.id}/${m.id}`]) selected.push({ provider: g.id, model: m.id, tier: g.id });
+          }
+        }
+        if (selected.length === 0) {
+          setSubmitErr(t('pickerNoneSelected'));
+          return;
+        }
+        onConfirm(selected);
+      };
+
+      const selectedCount = Object.keys(checked).length;
 
       return h(
         'div',
@@ -380,7 +456,7 @@ window.__ModuleLoader__.load({
                               borderRadius: 8,
                             },
                           },
-                          g.name || g.id,
+                          t('pickerTierHeader', { name: g.name || g.id }),
                           h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, openProvider === g.id ? '▾' : '▸'),
                         ),
                         openProvider === g.id
@@ -390,22 +466,29 @@ window.__ModuleLoader__.load({
                               (g.models || []).map((m) => {
                                 const key = `${g.id}/${m.id}`;
                                 const inQueue = existing.includes(key);
+                                const isChecked = !inQueue && checked[key] === true;
                                 return h(
-                                  'button',
+                                  'label',
                                   {
                                     key: m.id,
-                                    disabled: inQueue,
-                                    onClick: () => { if (!inQueue) onPick(g.id, m.id); },
                                     style: {
-                                      width: '100%', textAlign: 'left', padding: '7px 14px 7px 22px',
-                                      background: 'transparent', border: 'none', color: 'inherit',
+                                      // 已入队的行整行禁用（防重复），勾选态置灰不可取消
+                                      display: 'flex', alignItems: 'center', gap: 8,
+                                      width: '100%', textAlign: 'left', padding: '7px 14px 7px 14px',
                                       cursor: inQueue ? 'not-allowed' : 'pointer', fontSize: 13, borderRadius: 6,
                                       opacity: inQueue ? 0.45 : 1,
                                     },
                                     onMouseEnter: (e) => { if (!inQueue) e.currentTarget.style.background = 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14'; },
                                     onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent'; },
                                   },
-                                  (m.name || m.id) + (inQueue ? t('added') : ''),
+                                  h('input', {
+                                    type: 'checkbox',
+                                    checked: isChecked,
+                                    disabled: inQueue,
+                                    onChange: () => { if (!inQueue) toggle(g.id, m.id); },
+                                    style: { flex: 'none' },
+                                  }),
+                                  h('span', { style: { flex: 1 } }, (m.name || m.id) + (inQueue ? t('added') : '')),
                                 );
                               }),
                             )
@@ -413,6 +496,37 @@ window.__ModuleLoader__.load({
                       ),
                     ),
           ),
+          // 底部：批量提交 / 取消
+          h(
+            'div',
+            {
+              style: {
+                padding: '10px 14px',
+                borderTop: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                display: 'flex', alignItems: 'center', gap: 8,
+              },
+            },
+            h(
+              'button',
+              {
+                onClick: confirm,
+                disabled: selectedCount === 0,
+                style: {
+                  flex: 1,
+                  fontSize: 13, padding: '8px 12px', borderRadius: 8,
+                  border: '1px solid var(--dsw-alias-brand-primary, #4f7cf7)',
+                  background: 'var(--dsw-alias-brand-primary, #4f7cf7)',
+                  color: '#fff', cursor: selectedCount === 0 ? 'not-allowed' : 'pointer',
+                  opacity: selectedCount === 0 ? 0.5 : 1,
+                },
+              },
+              selectedCount ? t('pickerAddN', { n: selectedCount }) : t('close'),
+            ),
+            h('button', { onClick: onClose, style: btnSmall }, t('cancel')),
+          ),
+          submitErr
+            ? h('div', { style: { padding: '0 14px 8px', fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, submitErr)
+            : null,
         ),
       );
     }
@@ -550,12 +664,45 @@ window.__ModuleLoader__.load({
       return key ? t(key) : (entry.state || null);
     }
 
+    /**
+     * 免费/付费标记（F3）：free 绿 / paid 琥珀 / unknown 无标记（避免噪音）。
+     * @param {string|null|undefined} paid 'free'|'paid'|'unknown'
+     * @returns {object|null} React 元素；unknown/缺失时返回 null
+     */
+    function paidTag(paid) {
+      if (paid === 'free') {
+        return h('span', { style: { fontSize: 10, color: '#3a9e5f', border: '1px solid #3a9e5f55', borderRadius: 4, padding: '0 4px', lineHeight: '14px' } }, t('paidFree'));
+      }
+      if (paid === 'paid') {
+        return h('span', { style: { fontSize: 10, color: '#c98a1b', border: '1px solid #c98a1b55', borderRadius: 4, padding: '0 4px', lineHeight: '14px' } }, t('paidPaid'));
+      }
+      return null;
+    }
+
+    /**
+     * 大保底标记（F2）：📌 + 文案 tag；仅 pinned 渲染。
+     * @param {boolean|undefined} pinned
+     * @returns {object|null}
+     */
+    function pinnedTagEl(pinned) {
+      if (pinned !== true) return null;
+      return h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', border: '1px solid #4f7cf755', borderRadius: 4, padding: '0 4px', lineHeight: '14px', flex: 'none' } }, `📌 ${t('pinnedTag')}`);
+    }
+
+    /** 队列行的 paid 值（缺省归 'unknown'）。 */
+    function qValPaid(row) {
+      return row && (row.paid === 'free' || row.paid === 'paid') ? row.paid : 'unknown';
+    }
+
     function SettingsPage({ host }) {
       const [cfg, setCfg] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [snap, setSnap] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
       const [confirmRemove, setConfirmRemove] = React.useState(null); // 移除确认中的行索引
+      // F4 探测全部：进行中 + 结果提示
+      const [probing, setProbing] = React.useState(false);
+      const [probeNote, setProbeNote] = React.useState(null);
 
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
@@ -604,6 +751,35 @@ window.__ModuleLoader__.load({
         setPickerOpen(true);
       };
 
+      // F2/F3 行内写回：改 pinned / paid 然后落 state 文件。
+      // paid 在 unknown→free→paid→unknown 之间轮转，一遍就够（三态小循环）。
+      const pinRow = async (i, pinned) => {
+        const q = [...cfg.queue];
+        q[i] = { ...q[i], pinned };
+        await writeQueue(q);
+      };
+      const cyclePaid = async (i) => {
+        const order = ['unknown', 'free', 'paid'];
+        const cur = qValPaid(cfg.queue[i]);
+        const nextIdx = (order.indexOf(cur) + 1) % order.length;
+        const q = [...cfg.queue];
+        q[i] = { ...q[i], paid: order[nextIdx] };
+        await writeQueue(q);
+      };
+      // 手动探测全部（不跳过 paid）
+      const probeAll = async () => {
+        setProbing(true);
+        setProbeNote(null);
+        const r = await host.pingAll();
+        await refresh();
+        setProbing(false);
+        if (r?.ok && Array.isArray(r.results)) {
+          const ok = r.results.filter((x) => x.ok === true).length;
+          const fail = r.results.filter((x) => x.ok === false).length;
+          setProbeNote(t('probeAllDone', { ok, fail }));
+        }
+      };
+
       const modes = [
         [STICKY, 'modeSticky', 'modeStickyDesc'],
         [PROBE, 'modeProbe', 'modeProbeDesc'],
@@ -649,11 +825,39 @@ window.__ModuleLoader__.load({
                       },
                     },
                     h('strong', { style: { width: 28 } }, cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`),
-                    h('span', { style: { flex: 1, fontSize: 13 } }, `${r.provider} / ${r.model}`),
+                    h('span', { style: { flex: 1, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+                      h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${r.provider} / ${r.model}`),
+                      // F2 大保底标记
+                      pinnedTagEl(r.pinned === true),
+                      // F3 免费/付费标记
+                      paidTag(r.paid),
+                    ),
                     entry
                       ? h(Badge, { tone: entryTone(entry) }, `${entryText(entry)}${entry.failures ? t('failuresSuffix', { n: entry.failures }) : ''}`)
                       : null,
                     circuitInfoIcon(entry, snap),
+                    // F2：大保底 PIN 开关
+                    h(
+                      'button',
+                      {
+                        onClick: () => pinRow(i, !(r.pinned === true)),
+                        title: r.pinned === true ? t('unpin') : t('pinLast'),
+                        'aria-label': r.pinned === true ? t('unpin') : t('pinLast'),
+                        style: r.pinned === true ? { ...btnSmall, borderColor: 'var(--dsw-alias-brand-primary, #4f7cf7)', color: 'var(--dsw-alias-brand-primary, #4f7cf7)' } : btnSmall,
+                      },
+                      '📌',
+                    ),
+                    // F3：免费/付费轮转
+                    h(
+                      'button',
+                      {
+                        onClick: () => cyclePaid(i),
+                        title: qValPaid(r) === 'free' ? t('setPaidFree') : qValPaid(r) === 'paid' ? t('setPaidPaid') : t('setPaidUnknown'),
+                        'aria-label': t('queueRowHint'),
+                        style: btnSmall,
+                      },
+                      r.paid === 'free' ? '免费' : r.paid === 'paid' ? '付费' : '未标注',
+                    ),
                     h(
                       'button',
                       {
@@ -687,6 +891,21 @@ window.__ModuleLoader__.load({
                 }),
           ),
           h('button', { onClick: add, style: { ...btnSmall, marginTop: 8 } }, t('addModel')),
+          // F2/F3 行内标记说明 + F4 手动探测全部
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 } },
+            h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, t('queueRowHint')),
+            h('button', {
+              onClick: probeAll,
+              disabled: probing || !cfg.enabled || !cfg.queue.length,
+              title: t('probeAll'),
+              style: probing || !cfg.enabled || !cfg.queue.length ? btnSmallDisabled : btnSmall,
+            },
+              probing ? t('probingAll', { done: 0, total: cfg.queue.length }) : t('probeAll')),
+          ),
+          (probeNote || snap?.probingAll)
+            ? h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } },
+                snap?.probingAll ? t('probingAll', { done: 0, total: cfg.queue.length }) : probeNote)
+            : null,
         ),
         // 回切策略
         h(
@@ -726,6 +945,30 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
+        // F4 周期健康探测（默认关；打开会有真实请求，给出成本警告）
+        h(
+          'div',
+          null,
+          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('probeAll')),
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
+              h('input', {
+                type: 'number',
+                min: 0,
+                step: 1000,
+                value: Number(cfg.pingIntervalMs) || 0,
+                onChange: (e) => { const v = Math.max(0, Number(e.target.value) || 0); patch({ pingIntervalMs: v }); },
+                style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
+              }),
+              t('pingInterval'),
+            ),
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
+              h(Switch, { checked: cfg.pingSkipPaid !== false, onChange: (v) => patch({ pingSkipPaid: v }), label: '' }),
+              t('pingSkipPaid'),
+            ),
+            h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-state-warn-primary, #c98a1b)' } }, t('pingCostWarn')),
+          ),
+        ),
         // 运行态
         snap?.lastSwitch && snap.lastSwitch.from !== snap.lastSwitch.to
           ? h(
@@ -743,10 +986,11 @@ window.__ModuleLoader__.load({
           ? h(ModelPicker, {
               onClose: () => setPickerOpen(false),
               existing: cfg.queue.map((r) => `${r.provider}/${r.model}`),
-              onPick: async (provider, model) => {
+              // F1 批量添加：勾选的条目按「先厂商、后组内序」追加; 已存在的防重复兜底
+              onConfirm: async (selected) => {
                 setPickerOpen(false);
-                if (cfg.queue.some((r) => r.provider === provider && r.model === model)) return; // 防重复兜底
-                await writeQueue([...cfg.queue, { provider, model }]);
+                const clean = selected.filter((s) => !cfg.queue.some((r) => r.provider === s.provider && r.model === s.model));
+                if (clean.length) await writeQueue([...cfg.queue, ...clean]);
               },
             })
           : null,
@@ -992,12 +1236,37 @@ window.__ModuleLoader__.load({
 
       // 手动回切：把生效路由拉回 P1（p1Follow 下 = 当前会话模型）。
       // 「手动回切」模式下这是唯一的回去方式；其它模式也可用它提前结束粘滞。
-      const failback = async () => {
-        // -1 = P1 槽（p1Follow 下即当前会话模型）。旧的 0 在 p1Follow 下是 P2，
-        // 点"切回 P1"实际切到 P2，还会把空操作记成历史。
-        await host.manualFailback(-1);
+      // 手动切换：把生效路由直接拉到指定位置（-1 = P1 槽，p1Follow 下即当前会话模型）。
+      // 面板行点击走的就是这里；「手动回切」模式下这也是唯一的回去方式。
+      const switchTo = async (idx) => {
+        await host.manualFailback(idx);
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
+      };
+      const failback = () => switchTo(-1);
+      // P1 在 p1Follow 下就是「当前会话模型」——它的身份只能由宿主改。
+      // 这里给一个捷径：定位宿主内置的「选择模型」按钮并替用户点开它。
+      const openHostModelPicker = () => {
+        const names = tAll('selectModelAria').map((x) => x.toLowerCase());
+        const btn = Array.from(document.querySelectorAll('button')).find((x) => {
+          const aria = String(x.getAttribute('aria-label') || '').toLowerCase();
+          const tip = String(x.title || '').toLowerCase();
+          return names.some((n) => aria.includes(n) || tip.includes(n));
+        });
+        btn?.click();
+      };
+      // 行内点击切换的通用 props（禁用 / 已在用时不响应；键盘可达）
+      const rowSwitchProps = (active, idx, label) => {
+        if (!enabled || active || typeof idx !== 'number') return {};
+        return {
+          role: 'button',
+          tabIndex: 0,
+          title: t('clickToSwitch', { label }),
+          onClick: () => { void switchTo(idx); },
+          onKeyDown: (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); void switchTo(idx); }
+          },
+        };
       };
 
       return h(
@@ -1104,9 +1373,23 @@ window.__ModuleLoader__.load({
                 { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
                 h('div', {
                     key: 'p1-row',
+                    ...(enabled && !p1Active
+                      ? rowSwitchProps(false, p1Follow ? -1 : 0, 'P1')
+                      : enabled && p1Follow
+                        ? {
+                            role: 'button',
+                            tabIndex: 0,
+                            title: t('p1PickModel'),
+                            onClick: () => openHostModelPicker(),
+                            onKeyDown: (ev) => {
+                              if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openHostModelPicker(); }
+                            },
+                          }
+                        : {}),
                     style: {
                       display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
                       background: p1Active ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      cursor: enabled && (p1Follow || !p1Active) ? 'pointer' : 'default',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
@@ -1127,6 +1410,7 @@ window.__ModuleLoader__.load({
                         'div',
                         {
                           key: e.index,
+                          ...rowSwitchProps(isActive, e.index, lbl(e.index)),
                           style: {
                             display: 'flex',
                             alignItems: 'center',
@@ -1135,10 +1419,15 @@ window.__ModuleLoader__.load({
                             borderRadius: 8,
                             fontSize: 12,
                             background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                            cursor: enabled && !isActive ? 'pointer' : 'default',
                           },
                         },
                         h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),
-                        h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
+                        h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 } },
+                          h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
+                          e.pinned === true ? h('span', { title: t('pinnedTag'), style: { flex: 'none' } }, '📌') : null,
+                          paidTag(e.paid),
+                        ),
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                           : null,
@@ -1187,6 +1476,28 @@ window.__ModuleLoader__.load({
                         },
                         // 只有不在 P1 时才显示按钮：已在 P1 跟随再给"切回"就自相矛盾
                         t('failbackAction'),
+                      )
+                    : null,
+                  // F4：chip 面板手动探测全部
+                  (enabled && entries.length > 0)
+                    ? h(
+                        'button',
+                        {
+                          onClick: () => { void host.pingAll().then(() => { /* 周期性快照会刷新徽章 */ }); },
+                          disabled: snap?.probingAll === true,
+                          title: snap?.probingAll === true ? t('probingAll', { done: 0, total: entries.length }) : t('probeAll'),
+                          style: {
+                            fontSize: 11,
+                            padding: '3px 10px',
+                            borderRadius: 6,
+                            border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+                            background: 'transparent',
+                            color: 'inherit',
+                            cursor: snap?.probingAll === true ? 'not-allowed' : 'pointer',
+                            opacity: snap?.probingAll === true ? 0.5 : 1,
+                          },
+                        },
+                        snap?.probingAll === true ? t('probingAll', { done: 0, total: entries.length }) : t('probeAll'),
                       )
                     : null,
                   onOpenSettings
@@ -1266,6 +1577,16 @@ window.__ModuleLoader__.load({
           method: 'setQueue',
           invocation: { kind: 'direct' },
           parameters: [{ name: 'queue', wire: 'queue', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Queue') }],
+          result: { mode: 'src-json' },
+        },
+        // F4：探测全部（6th method）
+        {
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/pingAll',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'pingAll',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'opts', wire: 'opts', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#PingAllOpts') }],
           result: { mode: 'src-json' },
         },
       ],
@@ -1398,6 +1719,16 @@ window.__ModuleLoader__.load({
               return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] manualFailback failed', e);
+              return null;
+            }
+          },
+          // F4：探测全部（手动按钮优先，skipPaid=false 全探测；周期扫描由 host 端计时器驱动）
+          async pingAll() {
+            try {
+              const r = await rpcFace?.pingAll?.();
+              return unwrapEnvelope(r);
+            } catch (e) {
+              console.warn('[fallback-queue] pingAll failed', e);
               return null;
             }
           },
