@@ -108,6 +108,8 @@ window.__ModuleLoader__.load({
         noSwitchRecord: '无切换记录',
         failbackTitle: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
         failbackAction: '切回 P1',
+        clickToSwitch: '点击切换到 {label}',
+        p1PickModel: '点击更换当前会话模型（即 P1）',
         settings: '设置…',
         slotLabel: '故障转移',
         // 仅用于识别宿主内置「选择模型」按钮（DOM 匹配，不参与渲染）
@@ -211,6 +213,8 @@ window.__ModuleLoader__.load({
         noSwitchRecord: 'No switch history',
         failbackTitle: 'Switch the active route back to P1 (the current session model under p1Follow)',
         failbackAction: 'Switch back to P1',
+        clickToSwitch: 'Click to switch to {label}',
+        p1PickModel: 'Click to change the session model (P1)',
         settings: 'Settings…',
         slotLabel: 'Failover',
         selectModelAria: 'Select model',
@@ -1232,12 +1236,37 @@ window.__ModuleLoader__.load({
 
       // 手动回切：把生效路由拉回 P1（p1Follow 下 = 当前会话模型）。
       // 「手动回切」模式下这是唯一的回去方式；其它模式也可用它提前结束粘滞。
-      const failback = async () => {
-        // -1 = P1 槽（p1Follow 下即当前会话模型）。旧的 0 在 p1Follow 下是 P2，
-        // 点"切回 P1"实际切到 P2，还会把空操作记成历史。
-        await host.manualFailback(-1);
+      // 手动切换：把生效路由直接拉到指定位置（-1 = P1 槽，p1Follow 下即当前会话模型）。
+      // 面板行点击走的就是这里；「手动回切」模式下这也是唯一的回去方式。
+      const switchTo = async (idx) => {
+        await host.manualFailback(idx);
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
+      };
+      const failback = () => switchTo(-1);
+      // P1 在 p1Follow 下就是「当前会话模型」——它的身份只能由宿主改。
+      // 这里给一个捷径：定位宿主内置的「选择模型」按钮并替用户点开它。
+      const openHostModelPicker = () => {
+        const names = tAll('selectModelAria').map((x) => x.toLowerCase());
+        const btn = Array.from(document.querySelectorAll('button')).find((x) => {
+          const aria = String(x.getAttribute('aria-label') || '').toLowerCase();
+          const tip = String(x.title || '').toLowerCase();
+          return names.some((n) => aria.includes(n) || tip.includes(n));
+        });
+        btn?.click();
+      };
+      // 行内点击切换的通用 props（禁用 / 已在用时不响应；键盘可达）
+      const rowSwitchProps = (active, idx, label) => {
+        if (!enabled || active || typeof idx !== 'number') return {};
+        return {
+          role: 'button',
+          tabIndex: 0,
+          title: t('clickToSwitch', { label }),
+          onClick: () => { void switchTo(idx); },
+          onKeyDown: (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); void switchTo(idx); }
+          },
+        };
       };
 
       return h(
@@ -1344,9 +1373,23 @@ window.__ModuleLoader__.load({
                 { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
                 h('div', {
                     key: 'p1-row',
+                    ...(enabled && !p1Active
+                      ? rowSwitchProps(false, p1Follow ? -1 : 0, 'P1')
+                      : enabled && p1Follow
+                        ? {
+                            role: 'button',
+                            tabIndex: 0,
+                            title: t('p1PickModel'),
+                            onClick: () => openHostModelPicker(),
+                            onKeyDown: (ev) => {
+                              if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openHostModelPicker(); }
+                            },
+                          }
+                        : {}),
                     style: {
                       display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
                       background: p1Active ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      cursor: enabled && (p1Follow || !p1Active) ? 'pointer' : 'default',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
@@ -1367,6 +1410,7 @@ window.__ModuleLoader__.load({
                         'div',
                         {
                           key: e.index,
+                          ...rowSwitchProps(isActive, e.index, lbl(e.index)),
                           style: {
                             display: 'flex',
                             alignItems: 'center',
@@ -1375,6 +1419,7 @@ window.__ModuleLoader__.load({
                             borderRadius: 8,
                             fontSize: 12,
                             background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                            cursor: enabled && !isActive ? 'pointer' : 'default',
                           },
                         },
                         h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),

@@ -29,6 +29,7 @@
 - **大保底置顶（pinned）**：给某个模型打上📌「大保底」标记，无论怎么排序它都恒在队尾（最后兜底），P1 槽不受影响。
 - **免费/付费标记**：入口行手动标记免费（绿）或付费（琥珀），芯片与设置页同步显示；仅作标注辅助，不参与排序、不自动判定。
 - **快速探测（ping）**：一键探测队列里所有模型可用性，可配周期健康探测（默认关；付费模型默认跳过省配额）。
+- **面板直接点选切换**：点芯片面板里的任意一行，立即把生效路由切到该模型（不用等它故障）；P1 行在已生效时点击会打开宿主的模型选择器——P1 的身份就是当前会话模型，只有宿主能改。
 
 ### 效果图
 
@@ -137,6 +138,7 @@ When your current model hits its quota, gets rate-limited or becomes unavailable
 - **Pin as last resort (📌).** Mark any row as a “safety net” and it always stays at the tail of the failover order, no matter how you reorder the rest; the P1 slot is unaffected. Multiple pins keep their relative order; pinning everything just falls back to the natural order.
 - **Free/paid marks.** Toggle each entry 未标注 → free (green) → paid (amber). Shown in both the settings rows and the chip panel; purely a visual aid — never used for sorting or guessed automatically.
 - **Fast ping probe.** One click probes every queue model for availability (serial, ~1 token each); optional periodic health probing (off by default; paid models skipped by default to save quota/cost).
+- **Click-to-switch in the panel.** Click any row in the chip panel to route the active traffic to that model immediately — no failure required. Clicking the P1 row while it is active opens the host's model picker, because P1 *is* the current session model and only the host can change it.
 
 ### Screenshots
 
