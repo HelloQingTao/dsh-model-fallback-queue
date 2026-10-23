@@ -48,6 +48,8 @@ const DEFAULT_CONFIG = {
   cooldownMs: 60_000,
   failbackMode: 'sticky', // 'sticky' | 'probe' | 'manual'
   failbackDelayMs: 5 * 60_000, // probe 模式防抖
+  pingIntervalMs: 0, // 周期全员 ping 间隔（ms）；0 = 关闭（F4）
+  pingSkipPaid: true, // 周期扫描跳过 paid 条目，省配额（F4）
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -375,22 +377,42 @@ function createRouter(config, log) {
     const r = (config.queue || [])[pos];
     return r ? isAvailable(r, now) : false;
   }
-  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈） */
+  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈）。pinned 条目恒排最后（大保底）。 */
   function nextPositions(startIndex) {
     const queue = config.queue || [];
     const n = queue.length;
-    const out = [];
+    let out = [];
     if (!config.p1Follow) {
       for (let step = 1; step <= n; step += 1) out.push((startIndex + step) % n);
-      return out;
+    } else {
+      // p1Follow：环 = [P1(-1), 队列0=P2, 队列1=P3, ...]
+      const ring = [-1];
+      for (let i = 0; i < n; i += 1) ring.push(i);
+      const at = ring.indexOf(startIndex);
+      const base = at >= 0 ? at : 0;
+      for (let step = 1; step <= ring.length - 1; step += 1) out.push(ring[(base + step) % ring.length]);
     }
-    // p1Follow：环 = [P1(-1), 队列0=P2, 队列1=P3, ...]
-    const ring = [-1];
-    for (let i = 0; i < n; i += 1) ring.push(i);
-    const at = ring.indexOf(startIndex);
-    const base = at >= 0 ? at : 0;
-    for (let step = 1; step <= ring.length - 1; step += 1) out.push(ring[(base + step) % ring.length]);
-    return out;
+    return reorderPinnedLast(out, queue);
+  }
+
+  /**
+   * 把候选序里属于 pinned 条目的位置统一抽出来追加到序列末尾（大保底 = 最后兜底）。
+   * - 非 pinned 位置保持原相对顺序（仍是"健康状况相近时按物理序顺延"）；
+   * - pinned 位置保持它们之间的相对物理序（多个大保底按队列序顺延）；
+   * - -1 = P1 槽，无队列条目可查 → 恒视为非 pinned，留在最前（P1 是当前会话模型，本就该最先试）。
+   * 全 pin 时等效于没 pin（没 pin 的在前，全部 pin 就是原物理序），退化安全。
+   * @param {number[]} positions
+   * @param {Array<{pinned?: boolean}>} queue
+   * @returns {number[]}
+   */
+  function reorderPinnedLast(positions, queue) {
+    const pinned = [];
+    const rest = [];
+    for (const p of positions) {
+      const r = p >= 0 ? queue[p] : null;
+      (r && r.pinned === true ? pinned : rest).push(p);
+    }
+    return [...rest, ...pinned];
   }
   /**
    * 邻近可用：从 startIndex 起找第一个可用位置；粘滞模式绕回 P1 槽仅当其余全不可用。
@@ -656,7 +678,18 @@ function createRouter(config, log) {
         revision: runtime.revision,
         // 冷却时长给 UI：悬浮提示要用它把 openedAt 换算成"预计恢复"的时刻
         cooldownMs: config.cooldownMs,
-        entries: queue.map((r, i) => ({ index: i, provider: r.provider, model: r.model, ...view(r) })),
+        entries: queue.map((r, i) => ({
+          index: i,
+          provider: r.provider,
+          model: r.model,
+          // F2/F3/F1 前端需要的新字段：pinned（大保底）、paid（免费/付费）、tier（厂商分组）
+          pinned: r.pinned === true,
+          paid: r.paid === 'free' || r.paid === 'paid' ? r.paid : 'unknown',
+          tier: typeof r.tier === 'string' && r.tier ? r.tier : null,
+          ...view(r),
+        })),
+        // F4 全员 ping 进度指示：探测中为 true 时前端按钮置灰并显示 n/N 进度
+        probingAll: runtime.probeInFlight === true,
       };
     },
   };
@@ -763,8 +796,23 @@ class FallbackQueueService extends TypertRemoteService {
     const ok = await serviceBridge.saveQueue(queue);
     return { ok, queue: this.config.queue || [] };
   }
+
+  /**
+   * 全员快速 ping（F4）：对队列每条路由串行发一次微型探测。
+   * 手动触发（设置页 / 芯片面板按钮），全探（不跳过 paid，用户明确点了就探）。
+   * 结果逐条写进电路（recordSuccess/recordFailure），UI 徽章立即反映真实健康。
+   * @returns {Promise<{ok: boolean, results?: Array<{index:number,provider:string,model:string,ok:boolean|null,skipped?:boolean}>, reason?: string}>}
+   */
+  async pingAll() {
+    if (!serviceBridge?.probeAllRoutes) return { ok: false, reason: 'unavailable' };
+    try {
+      return await serviceBridge.probeAllRoutes({ skipPaid: false, source: 'manual' });
+    } catch (e) {
+      return { ok: false, reason: 'error', error: e?.message };
+    }
+  }
 }
-markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue']);
+markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue', 'pingAll']);
 
 export const inject = ['settings', 'llm'];
 
@@ -910,15 +958,17 @@ export function apply(ctx, llm) {
     }),
   );
 
-  // ---- 主动探测：半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，
-  // 由插件直接经 llm.stream 发一条微型请求（maxTokens=1），首个 chunk 到达即算
-  // 成功。否则"探测中"会永远挂着——没有新请求就没有人去试这条路由。
-  let probing = false; // 串行化：同一时刻最多一个探测请求在飞
-  async function probeRoute(route) {
-    if (!llm?.stream || probing) return;
-    probing = true;
+  // ---- 主动探测 ----
+  // 半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，由插件直接经 llm.stream 发
+  // 一条微型请求（maxTokens=1，'ping'），首个 chunk 到达即算成功（模型真的能回话）。
+  // F4 的「快速 ping」复用同一套探测逻辑，对队列每条路由做全员扫描，更快发现
+  // "还没熔断但已经死了"的模型（API key 失效 / 模型下架 / 网络不通）。
+  let probing = false; // 串行锁：同一时刻至多一个探测请求在飞（半开扫描 + 全员 ping 共用）
+  let probingAll = false; // 全员 ping 进行中（区别于半开扫描的 probing）
+  async function probeOne(route) {
+    // 单条路由的微型探测，无锁（调用方负责串行化）。返回是否可用，并写进电路。
     const key = router.keyOf(route);
-    ctx.logger?.info?.('[fallback-queue] probing half-open route %s/%s', route.provider, route.model);
+    ctx.logger?.info?.('[fallback-queue] probing route %s/%s', route.provider, route.model);
     try {
       const stream = llm.stream({
         provider: route.provider,
@@ -926,7 +976,7 @@ export function apply(ctx, llm) {
         messages: [{ role: 'user', name: 'fallback-queue-probe', content: 'ping' }],
         maxTokens: 1,
       });
-      // 首个 chunk 即视为可用（模型真的能回话），立即中断探测流省 token
+      // 首个 chunk 即视为可用，立即中断探测流省 token；15s 超时判死
       const iter = stream[Symbol.asyncIterator]();
       await Promise.race([
         iter.next(),
@@ -935,25 +985,85 @@ export function apply(ctx, llm) {
       router.recordSuccess(route);
       ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
+      return true;
     } catch (e) {
       router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, undefined, e?.status);
       ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s', key, e?.code);
+      return false;
+    }
+  }
+  // 半开扫描的入口：拿 probing 锁后探一条（一次探一条，串行推进）；
+  // 全员 ping 进行中（probingAll）时不插队，避免与 pingAll 并发。
+  async function probeRoute(route) {
+    if (!llm?.stream || probing || probingAll) return;
+    probing = true;
+    try {
+      return await probeOne(route);
     } finally {
       probing = false;
     }
+  }
+  // 全员快速 ping：对队列每条路由串行一次性探测。
+  //  - skipPaid=true 时跳过 paid==='paid' 的条目（周期扫描省配额；手动按钮传 false 全探）
+  //  - 复用 probing 锁（与半开扫描互斥）；期间置 router.runtime.probeInFlight → snapshot.probingAll
+  //  - 结果逐条 recordSuccess/recordFailure，反映到 UI 徽章
+  async function probeAllRoutes(opts = {}) {
+    const skipPaid = opts.skipPaid !== false;
+    if (probingAll || probing) return { ok: false, reason: 'busy', results: [] };
+    if (!llm?.stream) return { ok: false, reason: 'no-stream', results: [] };
+    probingAll = true;
+    router.runtime.probeInFlight = true;
+    router.touch();
+    const queue = config.queue || [];
+    const results = [];
+    try {
+      for (const [i, r] of queue.entries()) {
+        if (skipPaid && r.paid === 'paid') {
+          results.push({ index: i, provider: r.provider, model: r.model, ok: null, skipped: true });
+          continue;
+        }
+        const ok = await probeOne(r); // 已持有 probingAll，无需再抢 probing 锁
+        results.push({ index: i, provider: r.provider, model: r.model, ok, skipped: false });
+      }
+    } finally {
+      probingAll = false;
+      router.runtime.probeInFlight = false;
+      router.touch();
+    }
+    ctx.logger?.info?.('[fallback-queue] pingAll(%s): %d probed', opts.source || 'manual', results.length);
+    return { ok: true, results };
   }
   const probeTimer = setInterval(() => {
     const stale = router.staleHalfOpen();
     if (stale.length) void probeRoute(stale[0].route); // 一次探一条，串行推进
   }, 15_000);
-  ctx.effect(() => () => { clearTimeout(preflightTimer); clearInterval(probeTimer); });
+  // 周期全员 ping（默认关 pingIntervalMs=0）。自排：每轮结束后依当前配置再排下一轮。
+  let pingTimer = null;
+  function schedulePing() {
+    if (pingTimer) { clearTimeout(pingTimer); pingTimer = null; }
+    const iv = Number(config.pingIntervalMs) || 0;
+    if (!(iv > 0)) return;
+    pingTimer = setTimeout(() => {
+      pingTimer = null;
+      void probeAllRoutes({ skipPaid: config.pingSkipPaid !== false, source: 'periodic' })
+        .catch(() => {});
+      schedulePing(); // 一轮结束后再排下一轮，不并发
+    }, iv);
+  }
+  schedulePing(); // 启动时按当前配置排（默认 0 = 关闭）
+  ctx.effect(() => () => {
+    clearTimeout(preflightTimer);
+    clearInterval(probeTimer);
+    if (pingTimer) clearTimeout(pingTimer);
+  });
 
   // 供 Client（经 remote RPC 或事件）读取运行态快照
   ctx.effect(() => {
-    // settings/document-updated 时刷新本地 config
+    // settings/document-updated 时刷新本地 config + 依新配置重排周期 ping
     return ctx.on('settings/document-updated', (ns) => {
       if (ns !== NS) return;
       loadSettings();
+      schedulePing(); // pingIntervalMs 变了就立即按新间隔重排（0=关闭）
     });
   });
 
@@ -1146,7 +1256,7 @@ export function apply(ctx, llm) {
   });
 
   // ---- 运行态 RPC 服务 ----
-  serviceBridge = { router, config, saveSettings, saveQueue };
+  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes };
   ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
   ctx.effect(() => () => {
     serviceBridge = null;
@@ -1175,4 +1285,6 @@ export const Config = s.object({
   cooldownMs: s.number().default(DEFAULT_CONFIG.cooldownMs).description('熔断冷却毫秒').volatile(),
   failbackMode: s.union(['sticky', 'probe', 'manual']).default(DEFAULT_CONFIG.failbackMode).description('P1 恢复策略').volatile(),
   failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
+  pingIntervalMs: s.number().default(DEFAULT_CONFIG.pingIntervalMs).description('周期全员 ping 间隔毫秒（0=关闭）').volatile(),
+  pingSkipPaid: s.boolean().default(DEFAULT_CONFIG.pingSkipPaid).description('周期扫描跳过付费条目（省配额）').volatile(),
 });

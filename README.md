@@ -25,6 +25,10 @@
 - **全熔断降级放行**：所有路由都不可用时按原配置放行，插件不拦截请求。
 - **不抢同路由重试的活**：非致命错误一律放行，退避重试仍由 dsh-llm-retry 负责。
 - **界面中英双语**：所有界面文案跟随 DSH 的语言设置，自动在中文 / English 之间切换。
+- **厂商勾选批量添加**：模型选择器按厂商分组，复选框一次勾选多个，批量入队（按「先厂商、后组内序」追加；已入队的自动防重复）。
+- **大保底置顶（pinned）**：给某个模型打上📌「大保底」标记，无论怎么排序它都恒在队尾（最后兜底），P1 槽不受影响。
+- **免费/付费标记**：入口行手动标记免费（绿）或付费（琥珀），芯片与设置页同步显示；仅作标注辅助，不参与排序、不自动判定。
+- **快速探测（ping）**：一键探测队列里所有模型可用性，可配周期健康探测（默认关；付费模型默认跳过省配额）。
 
 ### 效果图
 
@@ -100,6 +104,16 @@ dsh plugin --profile web add dsh-model-fallback-queue
 - 队列为空或只有一项时不会发生切换。
 - 不要和其他故障转移插件同时启用，两个插件争抢同一错误事件没有意义。
 
+### 四大新功能
+
+**① 厂商勾选批量添加（F1）**：点「+ 添加模型」打开选择器，顶部按厂商分组（来自 DSH 内置模型目录 `group.id`），每组是复选框列表，可跨厂商一次勾选多个；点底部「添加 N 个到队列」批量入队，顺序＝先厂商、后组内展示序。已入队的行整行置灰防重复，勾了也不会再添。
+
+**② 大保底置顶（F2）**：队列每一行都有📌按钮。给某行打上「大保底」后，它在切换候选序里**恒排最后**（最后兜底）——不管你怎么用↑/↓调整其余行的顺序，大保底总在队尾；P1 槽（当前会话模型）不受影响，不能被打到大保底。允许多个大保底，彼此仍按物理序顺延；全部打上大保底时退化为原顺序，安全。
+
+**③ 免费/付费标记（F3）**：行内按钮在「未标注 → 免费 → 付费 → 未标注」间轮转；免费显示绿色标签、付费显示琥珀色标签、未标注不显示。芯片面板同步显示。该标注只做展示辅助，**不参与排序、不做自动判定**（没有可靠的免费/付费数据源，不猜）。
+
+**④ 快速探测 ping（F4）**：设置页排队按钮旁的「探测全部」一键并发（串行请求）探测队列里所有模型可用性，结束后提示「可用 N / 不可用 M」；芯片面板也有同款按钮。设置页下方可配**周期健康探测**：`周期探测间隔`（毫秒，0＝关闭，默认关）＋ `周期探测跳过付费模型`（默认开，省配额）。⚠ 周期探测会向模型发真实请求，可能消耗配额/费用。
+
 ### 许可证
 
 [MIT](LICENSE)
@@ -119,6 +133,10 @@ When your current model hits its quota, gets rate-limited or becomes unavailable
 - **Degrades safely.** When every route is tripped the original config is passed through untouched — the plugin never blocks a request.
 - **Does not fight same-route retries.** Non-fatal errors are always passed through; backoff retries stay with dsh-llm-retry.
 - **Bilingual UI.** Every label follows the DSH language setting and switches between 中文 and English automatically.
+- **Batch vendor-based adding.** The model picker groups by vendor; check a box per vendor, tick several, and add them all at once (appended vendor-by-vendor then in-group display order; entries already in the queue are greyed out and never re-added).
+- **Pin as last resort (📌).** Mark any row as a “safety net” and it always stays at the tail of the failover order, no matter how you reorder the rest; the P1 slot is unaffected. Multiple pins keep their relative order; pinning everything just falls back to the natural order.
+- **Free/paid marks.** Toggle each entry 未标注 → free (green) → paid (amber). Shown in both the settings rows and the chip panel; purely a visual aid — never used for sorting or guessed automatically.
+- **Fast ping probe.** One click probes every queue model for availability (serial, ~1 token each); optional periodic health probing (off by default; paid models skipped by default to save quota/cost).
 
 ### Screenshots
 
@@ -193,6 +211,16 @@ That file is plugin-private data and is **outside the Settings UI's config expor
 - Breaker state is in memory and resets on restart; the plugin writes no files and never touches the session.
 - No switching happens with an empty or single-entry queue.
 - Do not run another failover plugin at the same time — two plugins competing for the same error event is not useful.
+
+### Four new features
+
+**① Batch add by vendor (F1).** Click “+ Add model”; the picker lists vendors (from the built-in DSH model catalog `group.id`) with a checkbox list per vendor. Tick across vendors, then “Add N to queue” appends them all in vendor → in-group order. Rows already in the queue are disabled and deduped.
+
+**② Pin as last resort (F2).** Each queue row has a 📌 button. Pinning a row forces it to the **tail** of the failover candidate order (last resort) regardless of ↑/↓ moves on the other rows; the P1 slot (current session model) can't be pinned and stays first. Multiple pins keep their relative order; pinning everything degrades safely to the original order.
+
+**③ Free/paid marks (F3).** The row button cycles 未标注 → free → paid → 未标注; free shows a green tag, paid an amber tag, unknown none. The chip panel mirrors the tags. Purely a display aid — never used for ordering or auto-detected (there is no reliable source, so it never guesses).
+
+**④ Fast ping probe (F4).** The “Probe all” button (in the settings page next to the queue, and in the chip panel) pings every queue model serially and reports “N ok / M unavailable”. Below the queue, periodic health probing can be enabled via **probe interval (ms, 0 = off, default off)** and **skip paid models in periodic probes** (default on, saves quota). ⚠ Periodic probing sends real requests to models and can consume quota/cost.
 
 ### License
 
