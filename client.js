@@ -1025,8 +1025,9 @@ window.__ModuleLoader__.load({
               padding: 0,
               transition: 'border-color .15s, box-shadow .15s',
               // 悬停/点开光环（瞬态，对齐 icon-styles.md）：非 open 时不写内联 boxShadow，交由 .fq-badge:hover CSS 生效
+              // 注意：不能用 `${toneColor}33` 拼 8 位 hex——toneColor 是 var() 表达式，token 替换后与 33 相邻是非法声明，整条 box-shadow 会被丢弃
               '--fq-dot-color': toneColor,
-              boxShadow: open ? `0 0 0 2px ${toneColor}33` : undefined,
+              boxShadow: open ? `0 0 0 2px color-mix(in srgb, ${toneColor} 20%, transparent)` : undefined,
             },
           },
           label,
@@ -1304,7 +1305,7 @@ window.__ModuleLoader__.load({
             .fq-dot{position:absolute;top:-2px;right:-2px;width:5px;height:5px;border-radius:50%;
               background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);}
             .fq-dot-off{opacity:.6;}
-            .fq-badge:hover{box-shadow:0 0 0 2px var(--fq-dot-color)33;}`;
+            .fq-badge:hover{box-shadow:0 0 0 2px color-mix(in srgb, var(--fq-dot-color) 20%, transparent);}`;
           document.head.appendChild(st);
         }
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
