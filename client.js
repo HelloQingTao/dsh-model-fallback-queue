@@ -1006,6 +1006,7 @@ window.__ModuleLoader__.load({
         h(
           'button',
           {
+            className: 'fq-badge',
             onClick: () => setOpen((v) => !v),
             title: t('failoverTitle'),
             'aria-label': t('failoverTitle'),
@@ -1023,14 +1024,15 @@ window.__ModuleLoader__.load({
               lineHeight: '24px',
               padding: 0,
               transition: 'border-color .15s, box-shadow .15s',
-              boxShadow: open ? `0 0 0 2px ${toneColor}33` : 'none',
+              // 悬停/点开光环（瞬态，对齐 icon-styles.md）：非 open 时不写内联 boxShadow，交由 .fq-badge:hover CSS 生效
+              '--fq-dot-color': toneColor,
+              boxShadow: open ? `0 0 0 2px ${toneColor}33` : undefined,
             },
           },
           label,
           // 右上角健康状态小圆点（常亮静止；禁用态半透明）
           h('span', {
             className: enabled === false ? 'fq-dot fq-dot-off' : 'fq-dot',
-            style: { '--fq-dot-color': toneColor },
           }),
         ),
         open
@@ -1301,7 +1303,8 @@ window.__ModuleLoader__.load({
           st.textContent = `
             .fq-dot{position:absolute;top:-2px;right:-2px;width:5px;height:5px;border-radius:50%;
               background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);}
-            .fq-dot-off{opacity:.6;}`;
+            .fq-dot-off{opacity:.6;}
+            .fq-badge:hover{box-shadow:0 0 0 2px var(--fq-dot-color)33;}`;
           document.head.appendChild(st);
         }
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
