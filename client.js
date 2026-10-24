@@ -1302,9 +1302,15 @@ window.__ModuleLoader__.load({
             .fq-dot{position:absolute;top:-2px;right:-2px;width:5px;height:5px;border-radius:50%;
               background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);
               animation:fq-pulse 2s ease-in-out infinite;}
+            .fq-dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;
+              background:var(--fq-dot-color,#22c55e);pointer-events:none;
+              animation:fq-ring 2s ease-in-out infinite;}
             .fq-dot-fast{animation-duration:1s;}
+            .fq-dot-fast::after{animation-duration:1s;}
             .fq-dot-off{animation:none;opacity:.6;}
-            @keyframes fq-pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--fq-dot-color)}50%{opacity:.35;box-shadow:0 0 0 3px transparent}}`;
+            .fq-dot-off::after{animation:none;opacity:0;}
+            @keyframes fq-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+            @keyframes fq-ring{0%,100%{opacity:.45;transform:scale(.55)}50%{opacity:0;transform:scale(1)}}`;
           document.head.appendChild(st);
         }
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
