@@ -1027,9 +1027,9 @@ window.__ModuleLoader__.load({
             },
           },
           label,
-          // 右上角健康状态小圆点（带呼吸闪烁）
+          // 右上角健康状态小圆点（常亮静止；禁用态半透明）
           h('span', {
-            className: allOpen ? 'fq-dot fq-dot-fast' : enabled === false ? 'fq-dot fq-dot-off' : 'fq-dot',
+            className: enabled === false ? 'fq-dot fq-dot-off' : 'fq-dot',
             style: { '--fq-dot-color': toneColor },
           }),
         ),
@@ -1294,23 +1294,14 @@ window.__ModuleLoader__.load({
     }
 
     function registerSlots(ctx, rpcFace) {
-        // 健康圆点动画样式（幂等注入一次）
+        // 健康圆点样式：常亮静止、零动画（幂等注入一次）。动画版实测 GPU 常驻 +12~27 点，已废弃。
         if (!document.getElementById('fq-dot-style')) {
           const st = document.createElement('style');
           st.id = 'fq-dot-style';
           st.textContent = `
             .fq-dot{position:absolute;top:-2px;right:-2px;width:5px;height:5px;border-radius:50%;
-              background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);
-              animation:fq-pulse 2s ease-in-out infinite;}
-            .fq-dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;
-              background:var(--fq-dot-color,#22c55e);pointer-events:none;
-              animation:fq-ring 2s ease-in-out infinite;}
-            .fq-dot-fast{animation-duration:1s;}
-            .fq-dot-fast::after{animation-duration:1s;}
-            .fq-dot-off{animation:none;opacity:.6;}
-            .fq-dot-off::after{animation:none;opacity:0;}
-            @keyframes fq-pulse{0%,100%{opacity:1}50%{opacity:.35}}
-            @keyframes fq-ring{0%,100%{opacity:.45;transform:scale(.55)}50%{opacity:0;transform:scale(1)}}`;
+              background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);}
+            .fq-dot-off{opacity:.6;}`;
           document.head.appendChild(st);
         }
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
