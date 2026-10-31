@@ -48,6 +48,22 @@ const DEFAULT_CONFIG = {
   cooldownMs: 60_000,
   failbackMode: 'sticky', // 'sticky' | 'probe' | 'manual'
   failbackDelayMs: 5 * 60_000, // probe 模式防抖
+  // 周期全员 ping 间隔（ms）；0 = 关闭。
+  // 默认 60s 打开：没有周期探测时，UI 里的"健康"只能反映上一次真实请求的结果，
+  // 而空闲路由可能早就死了（key 失效/模型下架）却一直显示正常——没有前瞻性。
+  // 探测发的是 maxTokens=1 的微型请求，且默认跳过付费条目（pingSkipPaid），成本可控。
+  pingIntervalMs: 60_000,
+  // 周期扫描是否跳过付费条目。默认 false：后备队列常常整条都是付费模型，
+  // 跳过付费 = 一行有颜色的状态都看不到（全是「未测」），「提前检测」就成了一句空话。
+  // 探测是 maxTokens=1 的微型请求，成本可忽略；真不想花配额可在设置页关掉。
+  pingSkipPaid: false,
+  // 一次性迁移：旧默认 true（跳过付费）会让全付费队列永远停在「未验证」，
+  // 升级时翻一次；用户之后自己改回去就永久尊重。
+  pingSkipPaidMigrated: false,
+  // 一次性迁移标记：老版本默认 0（关闭），而 settings 会把默认值也落盘，
+  // 所以「0」既可能是"用户故意关掉"也可能是"从没设置过"。升级时用这个键把关一次，
+  // 之后用户把间隔改回 0 就永久尊重，不再自动改。
+  pingDefaultsMigrated: false,
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -75,8 +91,31 @@ function isClientFaultCode(code) {
   return typeof code === 'string' && CLIENT_FAULT_CODES.has(code);
 }
 
+/**
+ * 能力不匹配码：请求的形状（典型是推理档位）目标模型不认。
+ *
+ * 与「调用侧自伤」的区别必须分开处理：这类失败**不代表路由坏了**——模型本身
+ * 好好的，只是它不吃上一台模型设置的档位，所以不能熔断；但换一条路由确实能
+ * 救回来，这正是本插件存在的意义，因此它必须允许切换（见 onFailedAttempt）。
+ *
+ * 宿主的 LlmService 在发请求前做能力校验、0 毫秒本地拒绝：
+ *   throw new LlmError(`provider "..." model "..." does not support reasoning effort "balanced"`,
+ *                      "UNSUPPORTED_REASONING_EFFORT")
+ * 请求根本没出去——所以它既不是网络问题，也不是额度问题。
+ */
+const CAPABILITY_CODES = new Set(['UNSUPPORTED_REASONING_EFFORT', 'INVALID_MODEL_REASONING']);
+
+/** 适配层把能力不匹配降级成兜底码（PI_AI_ERROR/UNKNOWN）时，靠报文认出来 */
+const UNSUPPORTED_EFFORT_TEXT = /does not support reasoning effort|reasoning effort .*not supported/i;
+
 /** 失败来源分类（见 classifyFailureSource） */
-const FAILURE_SOURCE = { PROVIDER: 'provider', TRANSPORT: 'transport', UNKNOWN: 'unknown', CALLER: 'caller' };
+const FAILURE_SOURCE = {
+  PROVIDER: 'provider',
+  TRANSPORT: 'transport',
+  UNKNOWN: 'unknown',
+  CALLER: 'caller',
+  CAPABILITY: 'capability',
+};
 
 /** 适配层的"分类失败"兜底码：本身不携带"是谁的问题"的信息 */
 const FALLBACK_CODES = new Set(['PI_AI_ERROR', 'UNKNOWN']);
@@ -114,6 +153,8 @@ function looksLikeQuota(message) {
  *             既不秒切（避免把健康路由误杀），持续失败也终究会切走。
  * - caller    请求本身有问题，或 Runtime 自伤（插件/宿主 bug）→ 换模型救不了：
  *             不熔断、不切游标，只记原因让 UI 说清"为什么没切"。
+ * - capability 请求形状与目标模型能力不匹配（推理档位不支持）→ 不是路由坏了，
+ *             不熔断；但换一条路由能救，所以允许切换。
  *
  * @param {string} code 适配层给出的错误码
  * @param {unknown} message 上游错误原文
@@ -124,10 +165,17 @@ function looksLikeQuota(message) {
 function classifyFailureSource(code, message, status, immediateCodes) {
   // 1) 请求本身不合法（宿主已明确分类），或请求体类状态码
   if (isClientFaultCode(code)) return FAILURE_SOURCE.CALLER;
+  // 1.5) 能力不匹配：必须在 CALLER_STATUS 之前判——这个错误也可能带 400，
+  //      但"换模型救不了"的结论对它不成立（换一台支持该档位的模型就好了）。
+  if (CAPABILITY_CODES.has(code)) return FAILURE_SOURCE.CAPABILITY;
   if (typeof status === 'number' && CALLER_STATUS.has(status)) return FAILURE_SOURCE.CALLER;
   // 2) 兜底码 + Runtime 自伤特征：这是插件/宿主的问题，不是 provider 的
   if (FALLBACK_CODES.has(code) && SELF_FAULT_TEXT.test(typeof message === 'string' ? message : '')) {
     return FAILURE_SOURCE.CALLER;
+  }
+  // 2.5) 适配层丢掉了错误码、只把报文透传上来时，靠措辞认出同一件事
+  if (FALLBACK_CODES.has(code) && UNSUPPORTED_EFFORT_TEXT.test(typeof message === 'string' ? message : '')) {
+    return FAILURE_SOURCE.CAPABILITY;
   }
   // 3) 上游明确的问题源。刻意用 !FALLBACK_CODES.has(code) 挡一道：历史配置里若还留着
   //    PI_AI_ERROR/UNKNOWN，分层判定优先于旧配置，不会被拉回无条件熔断。
@@ -144,7 +192,6 @@ function classifyFailureSource(code, message, status, immediateCodes) {
 
 /** 熔断原因正文的上限：上游偶尔把整页 HTML / 长堆栈当 message 回传，不能整段塞进快照 */
 const MAX_REASON_LENGTH = 300;
-
 /**
  * 收敛上游报错原文成一行可展示的短文案（保留原文措辞，只压空白 + 截断）。
  * @param {unknown} message 上游错误信息
@@ -155,6 +202,34 @@ function normalizeReason(message) {
   const oneLine = message.replace(/\s+/g, ' ').trim();
   if (oneLine.length <= MAX_REASON_LENGTH) return oneLine;
   return `${oneLine.slice(0, MAX_REASON_LENGTH)}…`;
+}
+
+/**
+ * 把请求配置换成队列里的目标路由，并**剥掉推理档位**。
+ *
+ * 为什么必须剥：cfg.reasoningEffort（如 'balanced'）是「上一台模型」的能力选择。
+ * 宿主的 LlmService 在发请求前拿它去校验目标模型的能力清单（resolveCallWithInfo），
+ * 不匹配就直接抛 UNSUPPORTED_REASONING_EFFORT —— 那是本地 0 毫秒拒绝，一条请求
+ * 都没发出去。于是会出现最难查的一种状态：
+ *
+ *   探测（不带档位）判它健康 → 真实请求（带档位）永远失败 → 失败还被记成路由的锅
+ *
+ * 语义与宿主自己的 `dsh-tool-subagent` 一致（requestedAgentOptions /
+ * preflightChildLlmRoute）：路由变了就不继承父级 reasoningEffort，只让目标模型
+ * 用它自己的默认档位。路由没变时原样返回，不动用户的选择。
+ *
+ * @param {object} cfg 宿主传入的原始请求配置
+ * @param {{provider: string, model: string}} route 目标路由
+ * @returns {object} 可直接下发给宿主的配置
+ */
+function withRouteOverride(cfg, route) {
+  const routeChanged = cfg.provider !== route.provider || cfg.model !== route.model;
+  if (!routeChanged) return cfg;
+  if (cfg.reasoningEffort === undefined) {
+    return { ...cfg, provider: route.provider, model: route.model };
+  }
+  const { reasoningEffort: _dropped, ...rest } = cfg;
+  return { ...rest, provider: route.provider, model: route.model };
 }
 
 function createRouter(config, log) {
@@ -202,11 +277,34 @@ function createRouter(config, log) {
   // 运行态
   const runtime = {
     activeIndex: config.p1Follow ? -1 : 0, // 当前生效位置（p1Follow 下 -1 = P1 会话模型）
+    // 全局手动切换目标（manualFailback 写入，null = 没有手动意图）。
+    // 手动切换是明确的全局意图，必须压过"未记录会话回落到 P1"的默认规则，
+    // 否则切换只改显示不改路由：resolveIndex 会照样返回 P1。
+    manualIndex: null,
     inFlightIndex: -1, // 最近一次实际发出去的请求所走的路由；-1 = 未覆盖（放行原配置）
     lastProposal: null, // { key, idx, overridden } 最近一次 agent/request 的提案
     lastSwitch: null, // { from, to, code, at }
     revision: 0, // 状态版本号，客户端据此判断是否需要重新拉 snapshot
     probeInFlight: false,
+    // 全员探测进度：{ done, total } | null。
+    // 旧实现只有 probingAll 布尔，前端文案「探测中… 0/N」里的 N 永远传 0 ——
+    // 宣称的 n/N 进度从未实现。现在由 probeAllRoutes 每探完一条就更新，
+    // snapshot 原样透出，前端才能显示真实的「3/7」。
+    probeProgress: null,
+    // 手动切换后等待「下一条真实请求」确认：{ index, at }。
+    // 切换只决定"下一个请求用哪条"，本身不产生任何可用性证据——旧实现切换后立刻
+    // 发一条探测，拿不到会话模型就写 NO_SESSION_MODEL 的红色失败，于是「P1 验证失败」
+    // 和「P1 正常」同屏出现。现在不探测、不下结论，只记一个等待位。
+    pendingConfirm: null,
+    // 真实请求证据：{ index, provider, model, at, state:'sent'|'ok'|'fail', code, settledAt }。
+    // 「切换到底生效没有」唯一的可信答案：不是游标、不是探测，是宿主真的把请求发过去了。
+    lastRequest: null,
+    // 旧的探测验证回执：恒为 null，仅保留字段名给老客户端读。
+    lastVerify: null,
+    // 宿主的"实际使用"回执：{ index, provider, model, at }。
+    // 来源是宿主把我们的覆盖投影回 session/event model/selection —— 这是唯一
+    // 不依赖我们自己记账的确认信号。有它才能说"这次真的走的是 P3"。
+    hostConfirmed: null,
   };
   // ---- 会话隔离的实际路由（inFlight）----
   // inFlightIndex 与游标同理是会话体验：会话1在 P3、会话2在 P2 时，全局单值会让
@@ -234,9 +332,13 @@ function createRouter(config, log) {
   function cursorFor(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return runtime; // 无会话上下文 → 全局回退
     const cur = sessionCursor.get(sessionId);
-    // 未记录的会话一律从 P1 槽起步：新会话不该继承别的会话的切换进度。
+    // 未记录的会话：有全局手动切换意图时跟随它（manualFailback 已清空所有会话游标，
+    // 此时"没有记录"是手动切换的结果，不是新会话）；否则从 P1 槽起步——新会话不该
+    // 继承别的会话因熔断产生的切换进度。
     // 全局 activeIndex 只反映"曾经有会话切过多深"，供探测/预检选起点，不污染新会话。
-    if (cur === undefined) return { activeIndex: p1Position() };
+    if (cur === undefined) return {
+      activeIndex: Number.isInteger(runtime.manualIndex) ? runtime.manualIndex : p1Position(),
+    };
     return { activeIndex: cur }; // 只读视图，写经 setCursor
   }
   function setCursor(sessionId, idx) {
@@ -269,6 +371,13 @@ function createRouter(config, log) {
         state: CIRCUIT.CLOSED, failures: 0, openedAt: 0, lastAttemptAt: 0,
         // 最近一次失败的原因：熔断后 UI 的 ⓘ 悬浮提示要直接展示上游原文
         lastCode: null, lastMessage: '', retryAfterMs: 0, lastSource: null,
+        // 健康证据（前瞻性）：最近一次"真的能回话"的时刻与探测耗时。
+        // lastOkAt 同时被真实请求成功与探测成功刷新；lastProbeAt/probeLatencyMs/probeOk
+        // 只由主动探测写入。UI 靠它们区分「刚测过·820ms」「很久没测过」「上次探测失败」，
+        // 而不是只凭熔断状态猜——熔断是事后记账，本身没有预测能力。
+        lastOkAt: 0, lastProbeAt: 0, probeLatencyMs: 0, probeOk: null,
+        // 探测自己的失败原因：探测不再写熔断器，所以原因要单独留一份给 UI 的悬浮提示
+        lastProbeCode: null, lastProbeMessage: '',
       };
       circuits.set(key, c);
     }
@@ -317,15 +426,17 @@ function createRouter(config, log) {
 
   /**
    * 记一次失败并判定是否熔断。分层规则见 classifyFailureSource：
-   * provider 立即熔断；transport/unknown 按 failureThreshold 累积；caller 不计失败。
+   * provider 立即熔断；transport/unknown 按 failureThreshold 累积；
+   * caller 不计失败；capability 同样不计失败（模型没坏，只是不吃这个请求形状）。
    * @returns {string} 本次失败的来源分类（调用方可据此决定要不要切路由）
    */
   function recordFailure(route, code, message, retryAfterMs, status) {
     const c = circuitOf(keyOf(route));
+    c.lastAttemptAt = Date.now();
     const source = classifyFailureSource(code, message, status, config.immediateCodes);
     stampFailure(c, code, message, retryAfterMs, source);
-    if (source === FAILURE_SOURCE.CALLER) {
-      // 调用侧问题：不计失败、不熔断，但把原因记进电路，UI 才能解释"为什么没切"
+    if (source === FAILURE_SOURCE.CALLER || source === FAILURE_SOURCE.CAPABILITY) {
+      // 两类都不算路由的账，但把原因记进电路：UI 才能解释"为什么没切"/"为什么切了"
       touch();
       return source;
     }
@@ -346,6 +457,10 @@ function createRouter(config, log) {
     c.state = CIRCUIT.CLOSED;
     c.failures = 0;
     c.halfOpenAt = 0;
+    // 真实请求成功也是一条健康证据：UI 的"上次可用"要把它算进去，
+    // 否则一条一直在正常服务、只是没被探测的路由会显示"未测过"。
+    c.lastOkAt = Date.now();
+    c.lastAttemptAt = Date.now();
     // 恢复正常后清掉旧账：否则下次熔断前若没拿到新原因，悬浮提示会展示早已过期的报错
     c.lastCode = null;
     c.lastMessage = '';
@@ -375,22 +490,42 @@ function createRouter(config, log) {
     const r = (config.queue || [])[pos];
     return r ? isAvailable(r, now) : false;
   }
-  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈） */
+  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈）。pinned 条目恒排最后（大保底）。 */
   function nextPositions(startIndex) {
     const queue = config.queue || [];
     const n = queue.length;
-    const out = [];
+    let out = [];
     if (!config.p1Follow) {
       for (let step = 1; step <= n; step += 1) out.push((startIndex + step) % n);
-      return out;
+    } else {
+      // p1Follow：环 = [P1(-1), 队列0=P2, 队列1=P3, ...]
+      const ring = [-1];
+      for (let i = 0; i < n; i += 1) ring.push(i);
+      const at = ring.indexOf(startIndex);
+      const base = at >= 0 ? at : 0;
+      for (let step = 1; step <= ring.length - 1; step += 1) out.push(ring[(base + step) % ring.length]);
     }
-    // p1Follow：环 = [P1(-1), 队列0=P2, 队列1=P3, ...]
-    const ring = [-1];
-    for (let i = 0; i < n; i += 1) ring.push(i);
-    const at = ring.indexOf(startIndex);
-    const base = at >= 0 ? at : 0;
-    for (let step = 1; step <= ring.length - 1; step += 1) out.push(ring[(base + step) % ring.length]);
-    return out;
+    return reorderPinnedLast(out, queue);
+  }
+
+  /**
+   * 把候选序里属于 pinned 条目的位置统一抽出来追加到序列末尾（大保底 = 最后兜底）。
+   * - 非 pinned 位置保持原相对顺序（仍是"健康状况相近时按物理序顺延"）；
+   * - pinned 位置保持它们之间的相对物理序（多个大保底按队列序顺延）；
+   * - -1 = P1 槽，无队列条目可查 → 恒视为非 pinned，留在最前（P1 是当前会话模型，本就该最先试）。
+   * 全 pin 时等效于没 pin（没 pin 的在前，全部 pin 就是原物理序），退化安全。
+   * @param {number[]} positions
+   * @param {Array<{pinned?: boolean}>} queue
+   * @returns {number[]}
+   */
+  function reorderPinnedLast(positions, queue) {
+    const pinned = [];
+    const rest = [];
+    for (const p of positions) {
+      const r = p >= 0 ? queue[p] : null;
+      (r && r.pinned === true ? pinned : rest).push(p);
+    }
+    return [...rest, ...pinned];
   }
   /**
    * 邻近可用：从 startIndex 起找第一个可用位置；粘滞模式绕回 P1 槽仅当其余全不可用。
@@ -422,6 +557,13 @@ function createRouter(config, log) {
     PROBE_TIMEOUT_MS,
     sessionCursor,
     /**
+     * 取某条路由的电路对象（探测记账用）。
+     * probeOne 住在 apply 半区，看不到 createRouter 的闭包——旧实现直接裸调
+     * circuitOf()，每探测一次就抛 ReferenceError，被 pingAll 的 catch 吞成
+     * {ok:false, reason:'error'}，于是「探测全部」永远失败且一条证据都写不进去。
+     */
+    circuitOf,
+    /**
      * 记录「某会话最近一次实际发出去的路由」（-1 = 本次未覆盖，放行原配置）。
      * 必须经 router 暴露：setInFlight 是 createRouter 的闭包，apply 半区看不到它
      * —— 直接裸调用会 ReferenceError（agent/request 钩子整轮抛错，表现为
@@ -444,6 +586,9 @@ function createRouter(config, log) {
      * 就是"换了模型但没生效"（P1 行名字也不跟着变）。
      */
     retryFromP1(sessionId) {
+      // 用户手选模型 = 明确要回 P1：清掉之前的手动切换意图，否则下次没记录的会话
+      // 仍会按旧的手动目标走。
+      runtime.manualIndex = null;
       setCursor(sessionId, p1Position());
       setInFlight(sessionId, p1Position());
       runtime.lastProposal = null;
@@ -523,15 +668,39 @@ function createRouter(config, log) {
       if (cur >= queue.length) cur = queue.length - 1;
       if (positionAvailable(cur, now)) return cur;
       // 当前位置不可用 → 找下一个可用位置（可能是 P1 槽，也可能是队列里的后备）
-      const sticky = config.failbackMode === 'sticky';
-      // 粘滞模式：只有绕一圈找不到任何非 P1 可用位置时才允许回 P1
-      let chosen = pickFrom(cur, { allowP1: !sticky || cur === p1Pos, now });
-      if (chosen === null && sticky) chosen = pickFrom(cur, { allowP1: true, now });
+      const mode = config.failbackMode;
+      // 「能不能自动回 P1」由回切策略决定——旧实现只区分 sticky/非 sticky，
+      // probe 与 manual 都被当成"永远可以回 P1"，于是：
+      //   · manual 模式会在后备挂掉时自己跳回 P1（"永不自动回切"名存实亡）；
+      //   · probe 模式的 failbackDelayMs 防抖从未被读取，冷却一到立刻回切，
+      //     形成 P1 抖动→切走→立刻回切→再抖动 的循环。
+      // 三种模式的真实语义：
+      //   manual → false：只能由用户 manualFailback 拉回
+      //   sticky → null ：仅在绕一圈全不可用时兜底回 P1
+      //   probe  → bool ：P1 已恢复 且 距上次切走已过防抖期
+      const canFallbackToP1 = (() => {
+        if (cur === p1Pos) return true;            // 本来就在 P1，无需"回切"
+        if (mode === 'manual') return false;
+        if (mode === 'sticky') return null;
+        const delay = Number(config.failbackDelayMs) || 0;
+        const switchedAt = runtime.lastSwitch?.at || 0;
+        const elapsed = Date.now() - switchedAt;
+        if (delay > 0 && switchedAt > 0 && elapsed < delay) return false;
+        return positionAvailable(p1Pos, now);
+      })();
+      // 第一轮：只有明确"可以回 P1"（true）才把 P1 槽放进候选。
+      // 粘滞（null）第一轮必须**排除** P1，否则环序里 P1 永远排在队列第一位，
+      // 于是 P3 一挂就跳回 P1、把 P2 整个跳过去——粘滞的意义正是"先顺着后备走完"。
+      let chosen = pickFrom(cur, { allowP1: canFallbackToP1 === true, now });
+      // 粘滞兜底：绕一圈实在没有别的可用路由，才允许回 P1 降级
+      if (chosen === null && canFallbackToP1 === null) chosen = pickFrom(cur, { allowP1: true, now });
       if (chosen === null) return -1; // 全熔断：放行原配置（降级）
       if (chosen !== cur) {
         runtime.lastSwitch = {
           from: cur,
           to: chosen,
+          // 回切到 P1 时标记 PROBE_FAILBACK，便于 UI/日志区分"故障切换"与"恢复回切"
+          code: chosen === p1Pos && mode === 'probe' ? 'PROBE_FAILBACK' : undefined,
           at: Date.now(),
         };
         setCursor(sessionId, chosen);
@@ -567,17 +736,41 @@ function createRouter(config, log) {
       // 熔断，也不能把游标钉过去，否则一条坏请求会让健康路由整段冷却 60s。
       // 这个判定必须在 setCursor 之前——游标被钉到别的下标后，resolveIndex() 会推出
       // 下一条可用路由，等于对调用侧错误也做了一次切换。
-      if (classifyFailureSource(code, failure?.message, failure?.status, config.immediateCodes)
-        === FAILURE_SOURCE.CALLER) {
+      const source = classifyFailureSource(code, failure?.message, failure?.status, config.immediateCodes);
+      if (source === FAILURE_SOURCE.CALLER) {
         recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
         return false;
       }
+      // capability（推理档位不被目标模型支持）刻意**不在这里 return**：
+      // recordFailure 内部对它不计失败、不熔断，但这条路我们仍然要走下去——
+      // 换一台支持该档位的模型就能成就这一轮请求，只是失败的那条不该背锅。
       // 游标钉到实际失败的这条路由上，再算下一个。否则："P1 跟随当前模型"模式下
       // 用户手动选了 P3、P3 挂了，游标还停在 P2，resolveIndex() 会认为 P2 正常并
       // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
       // 挂掉的这条，同样切不出去。
       setCursor(sessionId, pos);
       recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
+      // 手动意图随失败失效：用户手选的那条挂了，manualIndex 必须清掉，否则新会话
+      // （或游标被清空之后）会继续回落到这条已经判死的路由，表现成"切走了又自己跳回去"。
+      if (runtime.manualIndex === pos) runtime.manualIndex = null;
+      // capability：请求形状（推理档位）不被这条模型接受。recordFailure 已按
+      // 「不计失败、不熔断」分流，所以 resolveIndex 会认为它"仍然可用"并原地返回
+      // 同一条——那样这一轮请求就白挂了。这里显式跳过失败位置一次：换一条路由能
+      // 救这一轮，而失败那条的健康状态一点没动，下一条请求仍可能再试它。
+      if (source === FAILURE_SOURCE.CAPABILITY) {
+        const next = pickFrom(pos, { allowP1: true });
+        if (next === null || next === pos) {
+          touch();
+          return false;
+        }
+        setCursor(sessionId, next);
+        setInFlight(sessionId, next);
+        runtime.lastSwitch = { from: pos, to: next, code, at: Date.now() };
+        touch();
+        return true;
+      }
+      // 真实请求失败是比探测更强的证据：最近的请求证据直接改判失败（由调用方在
+      // request-error 钩子里写 lastRequest，这里不再维护第二条回执）。
       const nextIdx = this.resolveIndex(Date.now(), sessionId);
       if (nextIdx === -1) {
         // p1Follow 下 -1 有两种可能：绕回 P1 槽（会话模型，这也是一次真切换，UI 要跟着动），
@@ -618,9 +811,12 @@ function createRouter(config, log) {
           // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
           invalid: health.get(key) === HEALTH.INVALID,
           // 熔断原因（ⓘ 悬浮提示）：只在电路非正常态时给出，健康路由不背历史失败的账
-          // caller 类失败不进熔断，但同样要能解释"为什么没切"：所以它的原因
-          // 在 closed 状态下也下发（其余状态仍只在非正常态给，健康路由不背旧账）。
-          lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED || c.lastSource === FAILURE_SOURCE.CALLER)
+          // caller / capability 两类失败不进熔断，但同样要能解释"为什么没切"或
+          // "为什么这条被跳过了"：所以它们的原因在 closed 状态下也下发
+          // （其余状态仍只在非正常态给，健康路由不背旧账）。
+          lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED
+            || c.lastSource === FAILURE_SOURCE.CALLER
+            || c.lastSource === FAILURE_SOURCE.CAPABILITY)
             ? { code: c.lastCode, message: c.lastMessage, source: c.lastSource || null }
             : null,
           // 失败来源分层（provider/transport/unknown/caller）：caller = 请求或 Runtime
@@ -630,12 +826,23 @@ function createRouter(config, log) {
           // 预计恢复 = 熔断时刻 + 冷却时长；half_open 之后就不再是"等冷却"了
           recoverAt: c.state === CIRCUIT.OPEN ? c.openedAt + config.cooldownMs : null,
           retryAfterMs: c.retryAfterMs || null,
+          // 健康证据（前端据此画"绿/黄/灰"与"x 秒前可用"）：熔断状态是事后结果，
+          // 这三个时间戳才是"多久以前确认过它还能回话"。
+          lastOkAt: c.lastOkAt || null,
+          lastProbeAt: c.lastProbeAt || null,
+          probeLatencyMs: c.probeLatencyMs || null,
+          probeOk: c.probeOk === null || c.probeOk === undefined ? null : c.probeOk === true,
+          // 上次探测的失败原因（探测不写熔断器，所以单独下发）
+          probeError: c.lastProbeCode ? { code: c.lastProbeCode, message: c.lastProbeMessage || null } : null,
         };
       };
       return {
         enabled: config.enabled,
         p1Follow: config.p1Follow,
         activeIndex: runtime.activeIndex,
+        // 手动切换目标：客户端在"本会话还没有请求记录"时用它显示生效路由，
+        // 修「切到 P4 了但芯片仍写 P1、P4 行不高亮」。
+        manualIndex: runtime.manualIndex,
         inFlightIndex: runtime.inFlightIndex,
         // per-session inFlight 映射随快照下发：客户端按当前会话取自己的显示值，
         // 修「会话1在 P3、会话2在 P2 时芯片互相覆盖」的问题。
@@ -653,10 +860,40 @@ function createRouter(config, log) {
           ? { provider: sessionModel.provider, model: sessionModel.model, ...view(sessionModel) }
           : null,
         lastSwitch: runtime.lastSwitch,
+        // 手动切换后的等待位：UI 用它显示「已切到 P3，等下次请求确认」。
+        pendingConfirm: runtime.pendingConfirm ? { ...runtime.pendingConfirm } : null,
+        // 真实请求证据：最近一条真的发出去的请求走了哪条、结果如何。
+        // 这是「切换到底生效没有」唯一可信的答案（游标只是意图，探测只是旁证）。
+        lastRequest: runtime.lastRequest ? { ...runtime.lastRequest } : null,
+        // 旧字段：恒为 null，保留给老客户端，避免读不到就当成"验证失败"。
+        lastVerify: null,
+        // 宿主确认的"最近一轮实际使用的路由"（来自宿主回写的 model/selection），
+        // 与 lastVerify（探测能否回话）是两条独立证据：一条证明"真的发到了这条"，
+        // 一条证明"这条当时能回话"。
+        hostConfirmed: runtime.hostConfirmed ? { ...runtime.hostConfirmed } : null,
         revision: runtime.revision,
         // 冷却时长给 UI：悬浮提示要用它把 openedAt 换算成"预计恢复"的时刻
         cooldownMs: config.cooldownMs,
-        entries: queue.map((r, i) => ({ index: i, provider: r.provider, model: r.model, ...view(r) })),
+        // 探测节奏给 UI：前端据此判断"这条多久没被确认过"是否已经超过一个周期，
+        // 超了就降级成灰色（未验证），不再冒充绿色可用。
+        pingIntervalMs: Number(config.pingIntervalMs) || 0,
+        pingSkipPaid: config.pingSkipPaid !== false,
+        entries: queue.map((r, i) => ({
+          index: i,
+          provider: r.provider,
+          model: r.model,
+          // F2/F3/F1 前端需要的新字段：pinned（大保底）、paid（免费/付费）、tier（厂商分组）
+          pinned: r.pinned === true,
+          paid: r.paid === 'free' || r.paid === 'paid' ? r.paid : 'unknown',
+          tier: typeof r.tier === 'string' && r.tier ? r.tier : null,
+          ...view(r),
+        })),
+        // F4 全员 ping 进度指示：探测中为 true 时前端按钮置灰并显示 n/N 进度
+        probingAll: runtime.probeInFlight === true,
+        // 真实进度 {done,total}：旧实现只给布尔，前端拿不到已完成条数，
+        // 「探测中… n/N」的 n 只能硬编码 0。
+        probingDone: runtime.probeProgress ? runtime.probeProgress.done : 0,
+        probingTotal: runtime.probeProgress ? runtime.probeProgress.total : 0,
       };
     },
   };
@@ -745,12 +982,21 @@ class FallbackQueueService extends TypertRemoteService {
     // 手动回切是明确的全局意图：清掉所有会话游标，全部回到目标位置
     this.router.resetSessionCursors();
     this.router.runtime.activeIndex = i;
+    // 记下全局手动意图：cursorFor() 对"没有会话记录"的会话据此回落，
+    // 否则清空游标后下一个请求又回到 P1，切换只在 UI 上生效。
+    this.router.runtime.manualIndex = i;
     // 手动回切后 UI 立刻应显示目标位置，而不是继续显示上次失败的路由。
     this.router.resetSessionInFlight(i);
     // from === i 是空操作（已经在 P1 又点了一次）：不记历史，否则出现"P1 → P1"
     if (from !== i) this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
+    // 旧实现这里立刻发一条 maxTokens=1 的探测，并在拿不到会话模型时写一条
+    // NO_SESSION_MODEL 的红色失败——于是面板上「P1 验证失败」和「P1 正常」同时出现。
+    // 切换的真实性只能由**下一条真实请求**证明：记一个等待位，请求发出去后由
+    // lastRequest 记录它到底走了哪条、成没成。不探测、不伪造结论。
+    r.lastVerify = null;
+    r.pendingConfirm = { index: i, at: Date.now() };
     this.router.touch();
-    return { ok: true };
+    return { ok: true, pending: { ...this.router.runtime.pendingConfirm } };
   }
 
   /** 读当前队列顺序（来自 state 文件，非 settings） */
@@ -763,13 +1009,47 @@ class FallbackQueueService extends TypertRemoteService {
     const ok = await serviceBridge.saveQueue(queue);
     return { ok, queue: this.config.queue || [] };
   }
+
+  /**
+   * 全员快速 ping（F4）：对队列每条路由串行发一次微型探测。
+   * 手动触发（设置页 / 芯片面板按钮），全探（不跳过 paid，用户明确点了就探）。
+   * 结果逐条写进电路（recordSuccess/recordFailure），UI 徽章立即反映真实健康。
+   * @returns {Promise<{ok: boolean, results?: Array<{index:number,provider:string,model:string,ok:boolean|null,skipped?:boolean}>, reason?: string}>}
+   */
+  async pingAll() {
+    if (!serviceBridge?.probeAllRoutes) return { ok: false, reason: 'unavailable' };
+    try {
+      return await serviceBridge.probeAllRoutes({ skipPaid: false, source: 'manual' });
+    } catch (e) {
+      return { ok: false, reason: 'error', error: e?.message };
+    }
+  }
 }
-markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue']);
+markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue', 'pingAll']);
 
 export const inject = ['settings', 'llm'];
 
-export function apply(ctx, llm) {
-  const config = { ...DEFAULT_CONFIG };
+/**
+ * 插件入口。
+ *
+ * ⚠️ 签名契约：cordis 的插件入口是 apply(ctx, config) —— **第二个参数是插件自己的
+ * Config，不是服务**。服务只能经 `ctx.<name>` 取（hardDependency 走 inject，
+ * 可选依赖走 ctx.get('<name>')）。
+ *
+ * 曾经写成 `apply(ctx, llm)`：形参叫 llm，拿到的却是 Config 对象。那个对象上没有
+ * stream()/listProviders()，于是：
+ *   - 预检 llm.listProviders 守卫整段短路（永远 checked:0，配置死路由从不判死）；
+ *   - 探测 llm.stream 守卫整段短路（周期探测与手动 pingAll 静默空转，reason:'no-stream'）。
+ * 两者都不抛错，所以面板「探测」永远是灰的、也没人发现——正是这条错位造成的静默失效。
+ */
+export function apply(ctx, pluginConfig = {}) {
+  // loader 传入的 Config 作为基线，settings 文档随后覆盖它（settings 才是用户可见的真源）
+  const config = {
+    ...DEFAULT_CONFIG,
+    ...(pluginConfig && typeof pluginConfig === 'object' ? pluginConfig : {}),
+  };
+  // llm 是**服务**，不是第二参。可选获取：宿主没装 llm 时（单测/精简环境）不报错。
+  const llm = ctx.get ? ctx.get('llm') : ctx.llm;
 
   // ---- 设置持久化：namespace = 插件行 id ----
   const NS = 'dsh-model-fallback-queue';
@@ -851,6 +1131,32 @@ export function apply(ctx, llm) {
 
   const router = createRouter(config, ctx);
 
+  /**
+   * 一次性迁移：把周期探测的默认值从 0（关闭）升到 60s。
+   * 为什么需要迁移而不是只改 DEFAULT_CONFIG：settings 文档会把 schema 默认值一并落盘，
+   * 存量用户文档里已经写着 `pingIntervalMs: 0`，只改默认值永远轮不到生效。
+   * 用 pingDefaultsMigrated 把关一次：已经是正数的用户不动它；迁移后用户再改回 0 就永久尊重。
+   */
+  async function migratePingDefaults() {
+    if (config.pingDefaultsMigrated === true) return;
+    const patch = { pingDefaultsMigrated: true };
+    if (!(Number(config.pingIntervalMs) > 0)) patch.pingIntervalMs = DEFAULT_CONFIG.pingIntervalMs;
+    // 旧默认「跳过付费」会让整条付费队列永远显示未验证（用户报"面板全是未测，
+    // 提前检测根本不存在"就是这个）。升级时翻成「全探」一次，之后尊重用户设置。
+    if (config.pingSkipPaidMigrated !== true) {
+      patch.pingSkipPaid = DEFAULT_CONFIG.pingSkipPaid;
+      patch.pingSkipPaidMigrated = true;
+    }
+    Object.assign(config, patch);
+    await saveSettings(patch);
+    schedulePing();
+    ctx.logger?.info?.(
+      '[fallback-queue] ping defaults migrated → interval=%sms skipPaid=%s',
+      config.pingIntervalMs,
+      config.pingSkipPaid,
+    );
+  }
+
   // ---- 路由预检：启动时 + 适配器拓扑变化时，核对队列里的 provider 是否真的存在 ----
   // 没有这一步时，"provider 被卸载/改名/模型下架"只能等请求撞上 NO_ADAPTER、熔断
   // 计数走完才被发现；预检在装配期就判死并切走。llm 服务缺失（旧宿主/单测环境）
@@ -884,10 +1190,21 @@ export function apply(ctx, llm) {
       if (!d.provider || !d.model) return;
       // 忽略"我们自己的覆盖被投影回来"的 selection：那是后备路由在跑，不是用户手选。
       // 不忽略的话，每次熔断切到 P2/P3，宿主投影回写都会把 P1 的"本尊"改成后备模型。
+      // 但这条投影本身是**宿主的确认**：宿主把我们返回的 provider/model 写进了会话，
+      // 等于官方承认"本轮用的是它"。所以不拿它改 P1 身份，但要记成回执。
       const forced = router.runtime.lastProposal;
       if (forced?.overridden && forced.idx >= 0) {
         const q = (config.queue || [])[forced.idx];
-        if (q && q.provider === d.provider && q.model === d.model) return;
+        if (q && q.provider === d.provider && q.model === d.model) {
+          router.runtime.hostConfirmed = {
+            index: forced.idx,
+            provider: d.provider,
+            model: d.model,
+            at: Date.now(),
+          };
+          router.touch();
+          return;
+        }
       }
       const sessionId = session?.id ?? null;
       router.noteSessionModel(sessionId, d.provider, d.model);
@@ -910,50 +1227,253 @@ export function apply(ctx, llm) {
     }),
   );
 
-  // ---- 主动探测：半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，
-  // 由插件直接经 llm.stream 发一条微型请求（maxTokens=1），首个 chunk 到达即算
-  // 成功。否则"探测中"会永远挂着——没有新请求就没有人去试这条路由。
-  let probing = false; // 串行化：同一时刻最多一个探测请求在飞
-  async function probeRoute(route) {
-    if (!llm?.stream || probing) return;
-    probing = true;
+  // ---- 主动探测 ----
+  // 半开路由超过 PROBE_TIMEOUT_MS 仍没有真实请求路过落账时，由插件直接经 llm.stream 发
+  // 一条微型请求（maxTokens=1，'ping'），拿到一个**成功** chunk 才算可用。
+  // F4 的「快速 ping」复用同一套探测逻辑，对队列每条路由做全员扫描，更快发现
+  // "还没熔断但已经死了"的模型（API key 失效 / 模型下架 / 网络不通）。
+  let probing = false; // 串行锁：同一时刻至多一个探测请求在飞（半开扫描 + 全员 ping 共用）
+  let probingAll = false; // 全员 ping 进行中（区别于半开扫描的 probing）
+  /** 探测**请求**超时（毫秒）：到点 abort 掉挂起的流。
+   *  注意与 router 的 PROBE_TIMEOUT_MS（90s，半开状态等真实请求的最长期限）不是一回事。 */
+  const PROBE_REQUEST_TIMEOUT_MS = 15_000;
+  async function probeOne(route) {
+    // 单条路由的微型探测，无锁（调用方负责串行化）。返回是否可用，并写进电路。
     const key = router.keyOf(route);
-    ctx.logger?.info?.('[fallback-queue] probing half-open route %s/%s', route.provider, route.model);
+    const startedAt = Date.now();
+    // 探测结果无条件记账（无论成败）：UI 要能说"12 秒前测过、890ms、可用"，
+    // 只留熔断状态的话，一条刚刚测活的路由仍然显示得跟从未探测过一样。
+    // 注意：电路对象必须经 router.circuitOf 取——createRouter 的闭包在 apply 半区不可见。
+    const stampProbe = (ok) => {
+      const c = router.circuitOf(key);
+      c.lastProbeAt = Date.now();
+      c.probeLatencyMs = Date.now() - startedAt;
+      c.probeOk = ok;
+      c.lastAttemptAt = Date.now();
+      if (ok) c.lastOkAt = Date.now();
+    };
+    // 探测失败记账（只记证据，不动熔断器）。
+    const stampFailure = (code, message, probeOk = false) => {
+      const c = router.circuitOf(key);
+      c.probeOk = probeOk;
+      c.lastProbeCode = code;
+      c.lastProbeMessage = message || '';
+      // ⚠️ 失败也必须记时间戳。旧实现只记错误码不记 lastProbeAt，而前端判
+      // 「有没有证据」看的正是这个字段——于是「探测失败」和「从没探测过」在
+      // 界面上长得一模一样（都是灰「未测」）。用户点完「探测全部」看到一片
+      // 未测，完全无法区分"测过且挂了"和"压根没测"。
+      c.lastProbeAt = Date.now();
+      c.probeLatencyMs = Date.now() - startedAt;
+    };
+    ctx.logger?.info?.('[fallback-queue] probing route %s/%s', route.provider, route.model);
+    // 超时用 AbortSignal 传给宿主：旧实现用 Promise.race + setTimeout，超时后
+    // 那个 15s 定时器从不清除、底层 stream 也从不 abort——每探测一条就漏一个
+    // 挂起连接和一个定时器，全员 ping 一轮能漏掉整整一队。
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let timer = null;
     try {
+      if (!llm?.stream) {
+        ctx.logger?.warn?.('[fallback-queue] probe skipped: llm service unavailable');
+        return false;
+      }
+      if (controller) {
+        timer = setTimeout(() => controller.abort(), PROBE_REQUEST_TIMEOUT_MS);
+        if (timer.unref) timer.unref();
+      }
       const stream = llm.stream({
         provider: route.provider,
         model: route.model,
-        messages: [{ role: 'user', name: 'fallback-queue-probe', content: 'ping' }],
+        // 探测体只用最小合法字段：带 name 之类的扩展字段时，一些厂商会直接
+        // 400 拒绝，于是「能正常对话的模型」在面板上长期显示探测失败。
+        messages: [{ role: 'user', content: 'ping' }],
         maxTokens: 1,
+        ...(controller ? { signal: controller.signal } : {}),
       });
-      // 首个 chunk 即视为可用（模型真的能回话），立即中断探测流省 token
-      const iter = stream[Symbol.asyncIterator]();
-      await Promise.race([
-        iter.next(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 15_000)),
-      ]);
-      router.recordSuccess(route);
-      ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
+      // ⚠️ 关键语义：llm.stream **从不抛错**——适配层的失败会变成终态 finish chunk
+      // （reason.kind = 'error' | 'aborted'，里面才是 LlmFailure）。所以「拿到第一个
+      // chunk 就算成功」是错的：一条 key 失效的路由会立刻回一个 finish{error:AUTH}，
+      // 旧实现把它当成"能回话"，于是探测成功、面板刷绿、lastOkAt 被刷新——把死路由
+      // 涂成健康，比不探测更危险。必须逐 chunk 判。
+      let verdict = null; // null = 还没有结论
+      for await (const chunk of stream) {
+        if (!chunk || typeof chunk !== 'object') continue;
+        if (chunk.type === 'finish') {
+          const kind = chunk.reason?.kind;
+          if (kind === 'error' || kind === 'aborted') {
+            const failure = chunk.reason?.failure || {};
+            verdict = {
+              ok: false,
+              code: typeof failure.code === 'string' && failure.code ? failure.code : (kind === 'aborted' ? 'ABORTED' : 'UNKNOWN'),
+              message: failure.message || (kind === 'aborted' ? '探测被中止' : '上游返回失败'),
+              status: failure.status,
+            };
+          } else {
+            verdict = { ok: true }; // stop / tool-calls / max-tokens 都证明这条路由真的能回话
+          }
+          break; // 终态帧到手即收工
+        }
+        // 任何真实内容帧（文本/推理/tool-call）都足以证明模型能回话，
+        // 不必等 finish——这才是"maxTokens=1 探测"要省的那点 token。
+        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta'
+          || chunk.type === 'tool-call-delta' || chunk.type === 'block-start' || chunk.type === 'block-end') {
+          verdict = { ok: true };
+          break;
+        }
+        // usage 等无内容帧：继续读，不据此下结论
+      }
+      if (verdict === null) {
+        // 流读完了却一个帧都没给：上游空响应，不能算通过
+        verdict = { ok: false, code: 'EMPTY_RESPONSE', message: '探测没有收到任何内容' };
+      }
+      // 立刻中断探测流省 token（成功时尤其重要：我们只读了一个帧就走）
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
+      if (verdict.ok) {
+        router.recordSuccess(route);
+        stampProbe(true);
+        ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
+        return true;
+      }
+      // 失败路径：只记证据，不动熔断器。
+      // 为什么：探测是一条 maxTokens=1 的异形请求，某些厂商会以 400/429/超时拒绝它。
+      // 如果让它累计失败，60s 一次的周期探测会亲手把每条路由"熔断"掉——
+      // 监控把自己监控死，用户看到的就是"一片红、切过去也没用"。
+      // 真死了的路由由真实请求记账；探测只负责说明"上次探测没成功"。
+      const code = verdict.code;
+      const msg = String(verdict.message || '');
+      // 探测体被拒（400/参数不合法）说明**这次探测不成立**，不能据此说模型不可用：
+      // 标成「探测不支持」，UI 按灰色「未测」显示，不冒充黄色风险。
+      // 但鉴权/额度/模型不存在这类报错即使包着 400 也是真问题，不能洗白。
+      const realFault = /api.?key|authenticat|unauthor|forbidden|quota|额度|余额|余额不足|rate.?limit|not found|does not exist|no such model/i.test(msg);
+      const rejected = !realFault && (
+        code === 'INVALID_REQUEST' || code === 'BAD_REQUEST'
+        || code === 'INVALID_ARGS' || code === 'CONTEXT_WINDOW_EXCEEDED'
+        || verdict.status === 400 || verdict.status === 422
+        || /invalid (request|argument|parameter)|unsupported|not supported|max_tokens/i.test(msg)
+      );
+      if (rejected) {
+        stampFailure('PROBE_UNSUPPORTED', '该厂商拒绝了探测请求（不代表模型不可用）', null);
+      } else {
+        stampFailure(code, normalizeReason(msg));
+      }
+      ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s (circuit untouched)', key, code);
+      return false;
     } catch (e) {
-      router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, undefined, e?.status);
-      ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s', key, e?.code);
+      // 走到这里的是"真异常"：abort、网络层直接抛、适配器注册缺失等
+      const aborted = e?.name === 'AbortError' || controller?.signal?.aborted === true;
+      const code = aborted ? 'TIMEOUT' : (typeof e?.code === 'string' && e.code ? e.code : 'UNKNOWN');
+      stampFailure(code, normalizeReason(e?.message));
+      ctx.logger?.info?.('[fallback-queue] probe threw: %s code=%s (circuit untouched)', key, code);
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  // 半开扫描的入口：拿 probing 锁后探一条（一次探一条，串行推进）；
+  // 全员 ping 进行中（probingAll）时不插队，避免与 pingAll 并发。
+  async function probeRoute(route) {
+    if (!llm?.stream || probing || probingAll) return;
+    probing = true;
+    try {
+      return await probeOne(route);
     } finally {
       probing = false;
     }
+  }
+  // 全员快速 ping：对队列每条路由串行一次性探测。
+  //  - skipPaid=true 时跳过 paid==='paid' 的条目（周期扫描省配额；手动按钮传 false 全探）
+  //  - 复用 probing 锁（与半开扫描互斥）；期间置 router.runtime.probeInFlight → snapshot.probingAll
+  //  - 结果逐条 recordSuccess/recordFailure，反映到 UI 徽章
+  async function probeAllRoutes(opts = {}) {
+    const skipPaid = opts.skipPaid !== false;
+    if (probingAll || probing) return { ok: false, reason: 'busy', results: [] };
+    if (!llm?.stream) return { ok: false, reason: 'no-stream', results: [] };
+    probingAll = true;
+    router.runtime.probeInFlight = true;
+    const queue = config.queue || [];
+    // ⚠️ P1 槽必须一起探。旧实现只遍历 config.queue —— p1Follow 下 P1 = 会话
+    // 模型、根本不在队列里，于是它**永远轮不到探测**，面板上永远是灰「未测」，
+    // 哪怕它正是此刻给用户回话的那条（用户实测：P1 灰色"完全不对"，属实）。
+    // 进度按「本轮真正要探的条数」算：跳过付费时 total 不含被跳过项，
+    // 否则 UI 会永远停在 n/(含跳过) 而看起来没走完。
+    const p1Slot = config.p1Follow ? router.sessionModelFor(null) : null;
+    const planned = (p1Slot ? 1 : 0)
+      + (skipPaid ? queue.filter((r) => r.paid !== 'paid').length : queue.length);
+    router.runtime.probeProgress = { done: 0, total: planned };
+    router.touch();
+    const results = [];
+    let done = 0;
+    try {
+      if (p1Slot) {
+        // P1 是用户手选的会话模型，没有 paid 标记可言：手动/周期都探它。
+        const ok = await probeOne(p1Slot);
+        results.push({ index: -1, provider: p1Slot.provider, model: p1Slot.model, ok, skipped: false });
+        done += 1;
+        router.runtime.probeProgress = { done, total: planned };
+        router.touch();
+      }
+      for (const [i, r] of queue.entries()) {
+        if (skipPaid && r.paid === 'paid') {
+          results.push({ index: i, provider: r.provider, model: r.model, ok: null, skipped: true });
+          continue;
+        }
+        const ok = await probeOne(r); // 已持有 probingAll，无需再抢 probing 锁
+        results.push({ index: i, provider: r.provider, model: r.model, ok, skipped: false });
+        done += 1;
+        router.runtime.probeProgress = { done, total: planned };
+        router.touch(); // 每条探完就推进一次快照 → 前端能实时看到 3/7
+      }
+    } finally {
+      probingAll = false;
+      router.runtime.probeInFlight = false;
+      router.runtime.probeProgress = null; // 结束后清掉，避免下一次快照透出陈旧进度
+      router.touch();
+    }
+    ctx.logger?.info?.('[fallback-queue] pingAll(%s): %d probed', opts.source || 'manual', results.length);
+    return { ok: true, results };
   }
   const probeTimer = setInterval(() => {
     const stale = router.staleHalfOpen();
     if (stale.length) void probeRoute(stale[0].route); // 一次探一条，串行推进
   }, 15_000);
-  ctx.effect(() => () => { clearTimeout(preflightTimer); clearInterval(probeTimer); });
+  // 周期全员 ping（默认 60s）。自排：**等这一轮真的跑完**再排下一轮。
+  // 旧实现在触发后立刻 schedulePing()（没有 await）——注释写着"不并发"，实际却
+  // 在探测还飞着的时候就排好了下一轮。队列长时一轮全员探测很容易超过间隔，
+  // 于是下一轮撞上 probingAll 守卫直接返回 {reason:'busy'}，等于白排一轮；
+  // 更糟的是每轮都不知道自己有没有真的探成。现在串行化：跑完 → 再排。
+  let pingTimer = null;
+  function schedulePing() {
+    if (pingTimer) { clearTimeout(pingTimer); pingTimer = null; }
+    const iv = Number(config.pingIntervalMs) || 0;
+    if (!(iv > 0)) return;
+    pingTimer = setTimeout(async () => {
+      pingTimer = null;
+      try {
+        await probeAllRoutes({ skipPaid: config.pingSkipPaid !== false, source: 'periodic' });
+      } catch (e) {
+        ctx.logger?.warn?.('[fallback-queue] periodic ping failed: %s', e?.message);
+      } finally {
+        // 无论成败都排下一轮（失败不能让周期探测永久停摆）；
+        // 若期间配置被改成 0，schedulePing 内部会直接返回、不再排。
+        schedulePing();
+      }
+    }, iv);
+    // 探测计时器不该成为阻止进程退出的理由
+    if (pingTimer.unref) pingTimer.unref();
+  }
+  schedulePing(); // 启动时按当前配置排（默认 0 = 关闭）
+  ctx.effect(() => () => {
+    clearTimeout(preflightTimer);
+    clearInterval(probeTimer);
+    if (pingTimer) clearTimeout(pingTimer);
+  });
 
   // 供 Client（经 remote RPC 或事件）读取运行态快照
   ctx.effect(() => {
-    // settings/document-updated 时刷新本地 config
+    // settings/document-updated 时刷新本地 config + 依新配置重排周期 ping
     return ctx.on('settings/document-updated', (ns) => {
       if (ns !== NS) return;
       loadSettings();
+      schedulePing(); // pingIntervalMs 变了就立即按新间隔重排（0=关闭）
     });
   });
 
@@ -988,6 +1508,26 @@ export function apply(ctx, llm) {
     if (Number.isInteger(idx)) router.runtime.activeIndex = idx;
   };
 
+  /**
+   * 记录「这一条请求真的发出去了」。
+   * 这是「切换到底生效没有」唯一可信的证据：游标只是意图，探测只是旁证，
+   * 只有宿主真的把请求交给这条 provider/model，才算切换生效。
+   * 同时清掉等待位——已经有真实请求了，不再需要"等下次确认"。
+   */
+  const noteRequest = (index, provider, model, sessionId) => {
+    router.runtime.lastRequest = {
+      index,
+      provider,
+      model,
+      session: typeof sessionId === 'string' ? sessionId : null,
+      at: Date.now(),
+      state: 'sent',
+      code: null,
+      settledAt: null,
+    };
+    router.runtime.pendingConfirm = null;
+  };
+
   ctx.effect(() =>
     ctx.on('agent/request', async (payload, next) => {
       // 下游的 await next() 不能进 try：瀑布的 next() 只能消费一次，抛错之后再调一次
@@ -1004,6 +1544,7 @@ export function apply(ctx, llm) {
           // P1 真实放行 = 用户所选会话模型的可靠采样点：更新快照（也按会话记一份）。
           router.noteSessionModel(sessionId, cfg.provider, cfg.model);
           runtimePin(-1);
+          noteRequest(-1, cfg.provider, cfg.model, sessionId);
           // UI 显示的是"实际在跑的这条"：P1 槽就是 -1
           router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = { ...lastProposal };
@@ -1012,6 +1553,7 @@ export function apply(ctx, llm) {
         }
         if (idx === -1) {
           lastProposal = null; // 队列不生效：原配置即提案，交由下游
+          noteRequest(-1, cfg.provider, cfg.model, sessionId);
           router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
           return cfg;
@@ -1019,15 +1561,29 @@ export function apply(ctx, llm) {
         const route = config.queue[idx];
         if (!route) {
           lastProposal = null;
+          noteRequest(-1, cfg.provider, cfg.model, sessionId);
           router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
           return cfg;
         }
         lastProposal = { key: router.keyOf(route), idx, overridden: true };
+        noteRequest(idx, route.provider, route.model, sessionId);
         router.setInFlight(sessionId, idx);
         router.runtime.lastProposal = { ...lastProposal };
         router.touch();
-        return { ...cfg, provider: route.provider, model: route.model };
+        // 换路由就剥掉推理档位：目标模型不认上一台的档位时，宿主会在本地直接
+        // 拒绝（UNSUPPORTED_REASONING_EFFORT），请求一条都发不出去。详见
+        // withRouteOverride 的注释。
+        if (cfg.reasoningEffort !== undefined
+          && (cfg.provider !== route.provider || cfg.model !== route.model)) {
+          ctx.logger?.info?.(
+            '[fallback-queue] dropped reasoningEffort "%s" for route %s/%s (capability belongs to the previous model)',
+            cfg.reasoningEffort,
+            route.provider,
+            route.model,
+          );
+        }
+        return withRouteOverride(cfg, route);
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
         lastProposal = null;
@@ -1091,6 +1647,17 @@ export function apply(ctx, llm) {
       try {
         // 会话隔离：切换游标按会话记（payload.agent 由 agentEvents() fused 注入）
         const sessionId = payload?.agent?.session?.id ?? null;
+        // 先给「最近的请求证据」落一下结果：面板上那句「上一轮实际使用」说的就是它。
+        // 这一条比任何探测都硬——真实对话请求失败了，就是这条路由当时不可用。
+        const lr = router.runtime.lastRequest;
+        if (lr && lr.state === 'sent') {
+          router.runtime.lastRequest = {
+            ...lr,
+            state: 'fail',
+            code: typeof failure?.code === 'string' && failure.code ? failure.code : 'UNKNOWN',
+            settledAt: Date.now(),
+          };
+        }
         const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure, failure, sessionId);
         // 诊断日志：判定结果。switched=false 时同时打出熔断态，便于看清是"全熔断"
         // 还是"码不在立即列表"还是"路由不在队列里"。
@@ -1131,6 +1698,13 @@ export function apply(ctx, llm) {
           route = queue.find((r) => router.keyOf(r) === proposal.key);
         }
         if (route) router.recordSuccess(route);
+        // 同一轮请求跑通了：把「最近的请求证据」标成 ok，面板据此显示
+        // 「上一轮实际使用：P3 · 成功 · 12s 前」——这是切换生效的实证。
+        const lr = router.runtime.lastRequest;
+        if (lr && lr.state === 'sent') {
+          router.runtime.lastRequest = { ...lr, state: 'ok', settledAt: Date.now() };
+          router.touch();
+        }
       } catch {
         /* 忽略 */
       }
@@ -1142,11 +1716,21 @@ export function apply(ctx, llm) {
     void (async () => {
       const legacyQueue = await loadSettings();
       await loadQueue(legacyQueue);
+      // 设置加载完之后再做一次性默认值迁移（依赖已落盘的配置值判断"是否从未设置过"）
+      await migratePingDefaults();
+      // ⚠️ 必须在这里**无条件**再排一次周期探测。
+      // apply 体里的 schedulePing()（前半区）跑在 loadSettings() 之前，那时
+      // config.pingIntervalMs 还是 Config 默认值；而 settings 文档才是真源，
+      // settings/document-updated 又只在 UI 保存时才触发。于是「配置文件里预置
+      // pingIntervalMs: 60000、重启后从不保存」的路径永远排不上周期探测——
+      // 用户实测 70 秒无任何探测（维护者评审必修 2）。
+      // migratePingDefaults() 只在首次迁移时调 schedulePing，已迁移用户会直接
+      // return，所以不能指望它兜底。
+      schedulePing();
     })().catch((e) => ctx.logger?.warn?.('[fallback-queue] boot load failed: %s', e?.message));
   });
-
   // ---- 运行态 RPC 服务 ----
-  serviceBridge = { router, config, saveSettings, saveQueue };
+  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes, probeRoute };
   ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
   ctx.effect(() => () => {
     serviceBridge = null;
@@ -1175,4 +1759,11 @@ export const Config = s.object({
   cooldownMs: s.number().default(DEFAULT_CONFIG.cooldownMs).description('熔断冷却毫秒').volatile(),
   failbackMode: s.union(['sticky', 'probe', 'manual']).default(DEFAULT_CONFIG.failbackMode).description('P1 恢复策略').volatile(),
   failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
+  pingIntervalMs: s.number().default(DEFAULT_CONFIG.pingIntervalMs).description('周期全员 ping 间隔毫秒（0=关闭）').volatile(),
+  pingSkipPaid: s.boolean().default(DEFAULT_CONFIG.pingSkipPaid).description('周期扫描跳过付费条目（省配额）').volatile(),
+  pingDefaultsMigrated: s.boolean().default(DEFAULT_CONFIG.pingDefaultsMigrated).description('内部：周期探测默认值已完成一次性升级').volatile(),
+  // 必须显式声明：migratePingDefaults() 会把它写进 settings，但 schema 没这个键时
+  // 该值虽然能被落盘，却不经过校验/默认值投影——等于一个"匿名"字段。声明后它才是
+  // 正式的一次性迁移闸门（写一次 true，之后用户再改回"跳过付费"永久尊重）。
+  pingSkipPaidMigrated: s.boolean().default(DEFAULT_CONFIG.pingSkipPaidMigrated).description('内部：探测不再跳过付费的一次性升级已完成').volatile(),
 });

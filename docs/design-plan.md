@@ -112,3 +112,65 @@
 - 设置：settingsScope namespace（不能带点）+ revision 乐观并发写；运行时字段 `.extra('volatile', true)`。
 - 兼容：非致命码 `await next()` 让路 llm-retry；检测到同类插件则默认关闭+黄条提醒；auto-continue 天然兼容。
 - 参考项目：LunFengChen/dsh-failover-queue（架构主体）、farion1231/cc-switch（neutral 错误三态、错误率熔断维度、全熔断降级放行+徽章）。
+
+---
+
+## 8. 二阶段：四大新功能（F1 厂商勾选 · F2 大保底 · F3 免费/付费 · F4 快 ping）
+
+> 依据 docs/feature-spec.md（t1 定稿的规格）落地。改动范围：state.js（队列 schema v2）、index.js（重排 + RPC + 周期探测）、client.js（选择器/设置页/芯片 + host 桥）。
+
+### 8.1 队列条目 schema v2（state.js）
+
+v1 条目只有 `{provider, model}`；v2 每条补齐：
+
+```
+{ provider, model, pinned: boolean(必填, 缺省 false),
+  tier?: string,                       // 厂商分组标签（来自 group.id），仅 UI 分组展示
+  paid: 'free'|'paid'|'unknown'(缺省 'unknown') }
+```
+
+- `STATE_VERSION` 1→2，`SUPPORTED_VERSIONS = [1,2]`。
+- `normalizeQueue` 收敛每条 → 补 `pinned`/`paid` 默认值；`readQueueState` 读 v1 时补字段后 `writeQueueState` 升 v2 落盘一次（幂等，下次读即 v2 不再写）。
+- `queue` 仍独立存 `$DSH_HOME/fallback-queue-state.json`，不进 settings（避免 theme 全量重刷白闪，见 §1）。
+
+### 8.2 F1 厂商勾选批量添加（client.js ModelPicker）
+
+- 厂商 = 模型目录 `group.id`；ModelPicker 由「单点即加入」改为 **checkbox 批处理**：跨厂商一次勾多个。
+- 确定后按「先厂商、后组内序」展开成 entries 追加进队列（A1,A2,A3,B1,B2…）；已入队的行整行置灰防重复（`existing` 命中）。
+- 引擎不改：物理队列序即切换序，批量仅影响"追加到队尾的顺序"。
+- 文案：`pickerAddN`（添加 N 个到队列）、`pickerTierHeader`（厂商：{name}）。
+
+### 8.3 F2 大保底 = pinned 恒最后兜底（index.js 逻辑重排）
+
+- 核心在 `nextPositions(startIndex)`（index.js:381-396）：输出候选序列后调 `reorderPinnedLast(out, queue)`（:408-416），把 pinned 位置 sink 到序列尾。
+- 语义：非 pinned 保原相对顺序；多个 pinned 保彼此物理序；`-1`（P1 槽）无队列条目可查 → 恒视为非 pinned 留在最前（P1 是当前会话模型，本应最先试）。
+- 一处改动同时覆盖 `resolveIndex`/`onFailedAttempt` 两条切换链（都走 `pickFrom`→`nextPositions`）。
+- 边界（按规格）：P1 槽不可 pin；允许多 pin；全 pin 退化 = 原物理序（安全）；不改熔断/冷却。
+- 快照 `entries[].pinned` 透传；设置页行内📌按钮 + 芯片面板行 📌 标记同步。
+
+### 8.4 F3 免费/付费标记（client.js 行内）
+
+- `paid` 由用户手标（无可靠自动数据源，不猜）：行内按钮 `unknown→free→paid→unknown` 轮转。
+- 展示：free 绿标签 / paid 琥珀标签 / unknown 无标记；设置页队列行、芯片面板行都渲染 `paidTag`。
+- **不参与候选排序**（跟 F2 的 pinned 不同，paid 只是标注）。
+
+### 8.5 F4 快速 ping 探测（index.js + client.js）
+
+- 新增 RPC `pingAll()`（FallbackQueueService 第 6 方法，`markRemoteMethods` 追加 `'pingAll'`）。
+- 抽 `probeOne(route)`：复用现有 `llm.stream('ping', …, maxTokens:1)` 首块，可 tap 即成功，15s 超时，串行。
+- `probeAllRoutes({skipPaid, source})`：带 `probingAll` 锁（与半开扫描 `probing` 互斥）+ `runtime.probeInFlight` → 快照 `probingAll`；不 ping P1 槽；不改熔断/回切逻辑。
+- 手动按钮 `skipPaid:false`（全探测）；周期 `schedulePing()` 按 `pingIntervalMs`（默认 0 关）自排，`pingSkipPaid`（默认 true，周期跳付费省配额）。
+- 设置页：队列旁「探测全部」按钮 + 周期探测配置（间隔数字 + 跳付费开关）+ 成本警告；芯片面板底部同款探测按钮。
+- host 桥（client.js registerSlots）加 `pingAll()`；TYPERT_REMOTE 描述符加 pingAll（第 6 个）。
+- Config 两新键：`pingIntervalMs`（默认 0）、`pingSkipPaid`（默认 true），均 `.volatile()`。
+
+### 8.6 i18n（21 键，zh/en 双语）
+
+`pinLast/unpin/pinnedTag/paidFree/paidPaid/paidUnknown/setPaidFree/setPaidPaid/setPaidUnknown/probeAll/probingAll/probeAllDone/pickerAddN/pickerTierHeader/pingInterval/pingSkipPaid/pingCostWarn/queueRowHint` 等，全部跟随 DSH 语言自动切换。
+
+### 8.7 验收核对（对照 feature-spec §8）
+
+- F1：勾选跨厂商批量入队顺序 = 厂商→组内；防重复置灰；node --check 通过。
+- F2：pinned 恒尾、P1 恒前、多 pin 保序、全 pin 退化 — 单测 `reorderPinnedLast` 边界。
+- F3：三态轮转 + 双端渲染，不参与排序。
+- F4：pingAll RPC 6 方法、probingAll 快照、周期配置生效（含 settings 变更即时重排）、付费周期跳过。
