@@ -75,8 +75,14 @@ for (const f of ['lastOkAt', 'lastProbeAt', 'probeLatencyMs', 'probeOk']) {
 }
 mustMatch('snapshot 暴露 pingIntervalMs', index, /pingIntervalMs: Number\(config\.pingIntervalMs\) \|\| 0/);
 mustMatch('snapshot 暴露 pingSkipPaid', index, /pingSkipPaid: config\.pingSkipPaid !== false/);
-mustMatch('默认周期探测为 60s', index, /pingIntervalMs: 60_000/);
-mustMatch('一次性迁移已接线', index, /await migratePingDefaults\(\)/);
+mustMatch('默认周期探测为关闭（0）', index, /pingIntervalMs: 0,/);
+mustMatch('默认跳过付费条目', index, /pingSkipPaid: true,/);
+// 默认值口径统一：周期探测默认关、默认跳过付费，且**不再**有"升级时强制翻转
+// 存量用户设置"的一次性迁移（那会把用户显式写的 0 改成 60000，等于替用户
+// 打开花钱的开关）。用户设置了多少就是多少。
+mustNotMatch('不再有强制翻转存量设置的迁移', index, /migratePingDefaults/);
+mustNotMatch('不再有 pingDefaultsMigrated 闸门', index, /pingDefaultsMigrated/);
+mustNotMatch('不再有 pingSkipPaidMigrated 闸门', index, /pingSkipPaidMigrated/);
 
 // ---------- 维护者评审：两条必修 + 一条建议的回归锁 ----------
 // 必修 1：pingAll 的 RPC 声明必须与实现同为「零参数」。
@@ -109,8 +115,8 @@ mustMatch('探测失败原因映射存在', client, /PROBE_REASON_KEYS/);
   const bootStart = index.indexOf('// ---- 启动加载设置 ----');
   check('启动加载设置区块存在', bootStart > 0);
   const bootBlock = index.slice(bootStart, bootStart + 1200);
-  mustMatch('loadSettings 之后补排周期探测',
-    bootBlock, /await migratePingDefaults\(\)[\s\S]*?schedulePing\(\)/);
+  mustMatch('loadSettings 之后无条件补排周期探测',
+    bootBlock, /await loadQueue\(legacyQueue\)[\s\S]*?schedulePing\(\)/);
 }
 
 // 建议 1：探测进度必须是真实 n/N，不能硬编码 done:0
@@ -133,8 +139,21 @@ mustMatch('真实请求失败改判 lastRequest', index, /state: 'fail',/);
 mustMatch('真实请求成功改判 lastRequest', index, /lr\.state === 'sent'/);
 mustMatch('探测体只用最小字段', index, /messages: \[\{ role: 'user', content: 'ping' \}\]/);
 mustMatch('探测被拒不冒充风险', index, /PROBE_UNSUPPORTED/);
-mustMatch('默认探测不跳过付费', index, /pingSkipPaid: false/);
-mustMatch('跳过付费的旧默认只迁移一次', index, /pingSkipPaidMigrated/);
+mustMatch('默认探测跳过付费条目', index, /pingSkipPaid: true/);
+
+// ---------- 熔断语义：探测成功不等于路由恢复 ----------
+// 探测是 1-token 的异形请求：厂商可能不计费、不校验余额。让它去改熔断账本，
+// 会把已熔断的路由一次 ping 洗回 closed（冷却期失效 + 失败计数被清零 +
+// 熔断原因被抹掉），熔断阈值因此永远触发不了。
+// 规则：只有真实请求能决定熔断与恢复；探测成功最多把「半开」推进回闭合。
+mustMatch('探测成功走 recordProbeSuccess', index, /router\.recordProbeSuccess\(route\)/);
+mustMatch('recordProbeSuccess 只复位半开', index, /if \(c\.state === CIRCUIT\.HALF_OPEN\)/);
+{
+  // probeOne 内部不允许再直接调 recordSuccess
+  const probeStart = index.indexOf('async function probeOne(');
+  const probeBlock = index.slice(probeStart, probeStart + 4000);
+  mustNotMatch('探测成功不再直接 recordSuccess', probeBlock, /router\.recordSuccess\(route\)/);
+}
 
 // ---------- 3b. 三个"静默失效"的硬约束（字符串断言曾全部漏掉） ----------
 // 这些 bug 的共同点：不抛错、不报警，只是功能悄悄不工作。

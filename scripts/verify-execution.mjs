@@ -10,11 +10,26 @@
  * 启动时序）**都不会让源码断言失败**——代码看起来完全正常，只是运行时被网关
  * 拒绝、或永远排不上定时器。只有真跑一遍才抓得到。
  *
+ * ⚠️ 本脚本会调 setQueue → 插件把队列写到 $DSH_HOME/fallback-queue-state.json。
+ * 而 dsh-home-paths 默认把 DSH_HOME 解析成真实的 ~/.dsh → 直接跑这个脚本会
+ * **覆盖用户自己的故障转移队列**（实测：跑完真实文件变成测试夹具
+ * {provider:"p", model:"auth"}，且无备份、无法从磁盘恢复）。
+ * 所以下面第一件事就是把 DSH_HOME 指向一次性临时目录，测试只脏临时目录。
+ *
  * 前置：node scripts/prepare-test-deps.mjs
  * 用法：node scripts/verify-execution.mjs
  */
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+
+// ---- 隔离用户数据：必须在 import index.js 之前设好 ----
+// state.js 的 statePath() 第一次调用时才会读 env 并缓存，所以这里设完即生效。
+const TEST_HOME = join(tmpdir(), `dsh-fallback-queue-test-${process.pid}`);
+process.env.DSH_HOME = TEST_HOME;
+mkdirSync(TEST_HOME, { recursive: true });
+process.on('exit', () => { try { rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* ignore */ } });
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -100,6 +115,11 @@ function makeCtx(settingsValue, injectedLlm) {
     get: (name) => (name === 'llm' ? injectedLlm : undefined),
     llm: injectedLlm,
     emit: () => {},
+    // ⚠️ cordis 的 Service 基类构造函数会调 ctx.reflect.provide(name, self, check)。
+    // 少了它 → new FallbackQueueService() 抛错 → ctx.__service 恒 undefined →
+    // 下面所有依赖 svc 的断言（必修1/必修2 的运行时验证）被 `if (svc)` 整块跳过，
+    // 脚本却只报「7/9 项通过」——看上去有绿灯，其实最关键的断言一条都没跑。
+    reflect: { provide: () => {} },
   };
   return { ctx, doc, events, hooks };
 }
@@ -134,8 +154,6 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
     enabled: true,
     pingIntervalMs: 40,        // 40ms 一轮 → 几百毫秒内必然触发，且不依赖 UI 保存
     pingSkipPaid: false,
-    pingDefaultsMigrated: true, // 已迁移过 → migratePingDefaults 立即 return，
-    pingSkipPaidMigrated: true, // 不能指望它兜底调 schedulePing
   }, slog);
   mod.apply(ctx, { enabled: true });
   // 先放一条队列，否则周期探测没东西可探
@@ -334,6 +352,52 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
     ok('探测失败 probeOk=false 且带错误码',
       failedEntry?.probeOk === false && !!failedEntry?.probeError?.code,
       JSON.stringify(failedEntry?.probeError));
+  }
+}
+
+// ================= 场景 I：熔断语义 —— 探测成功不等于路由恢复 =================
+// 探测是一条 maxTokens=1 的异形请求：厂商可能不计费、不校验余额。它成功不代表
+// 真实请求能成。让探测去改熔断账本，后果是：
+//   ① 已熔断（open）的路由被一次 ping 洗回 closed → 冷却期形同虚设；
+//   ② failures 被清零 → 连续失败永远攒不到阈值 → 熔断永远不触发（插件核心功能失效）；
+//   ③ lastCode/lastMessage 被抹掉 → 排障证据丢失。
+// 正确规则：只有真实请求能决定熔断与恢复；探测成功最多把「半开」推进回闭合
+// （半开的定义就是"等一条成功证据"，半开扫描 timer 靠它救活路由，这条要保留）。
+{
+  const illm = makeLlm();
+  const { ctx } = makeCtx({ enabled: true, pingIntervalMs: 0, pingSkipPaid: false }, illm);
+  const plug = mod.apply(ctx, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svc = ctx.__service;
+  if (svc && plug?.router?.circuitOf) {
+    await svc.setQueue([{ provider: 'p', model: 'good', pinned: false, paid: 'free' }]);
+    const c = plug.router.circuitOf('p\u0000good');
+
+    // ① open（额度耗尽被熔断）——探测成功后必须仍是 open
+    c.state = 'open';
+    c.failures = 2;
+    c.openedAt = Date.now();
+    c.lastCode = 'QUOTA';
+    c.lastMessage = 'insufficient balance';
+    await svc.pingAll();
+    ok('探测成功不复活已熔断路由（熔断只认真实请求）', c.state === 'open', `state=${c.state}`);
+    ok('探测成功不清失败计数（阈值不被偷清）', c.failures === 2, `failures=${c.failures}`);
+    ok('探测成功保留熔断原因（排障证据不被抹掉）', c.lastCode === 'QUOTA', `lastCode=${c.lastCode}`);
+
+    // ② half_open ——探测成功应把它推进回 closed（半开救活能力必须保留）
+    c.state = 'half_open';
+    c.halfOpenAt = Date.now();
+    c.failures = 2;
+    await svc.pingAll();
+    ok('半开态被探测成功推进回闭合（半开救活能力保留）', c.state === 'closed', `state=${c.state}`);
+
+    // ③ closed ——探测成功不得清零真实请求攒下的失败计数
+    c.state = 'closed';
+    c.failures = 1;
+    c.lastCode = 'TIMEOUT';
+    await svc.pingAll();
+    ok('闭合态探测成功不重置失败计数', c.failures === 1, `failures=${c.failures}`);
+    ok('闭合态探测成功不改真实请求的失败原因', c.lastCode === 'TIMEOUT', `lastCode=${c.lastCode}`);
   }
 }
 

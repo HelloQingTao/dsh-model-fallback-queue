@@ -49,21 +49,13 @@ const DEFAULT_CONFIG = {
   failbackMode: 'sticky', // 'sticky' | 'probe' | 'manual'
   failbackDelayMs: 5 * 60_000, // probe 模式防抖
   // 周期全员 ping 间隔（ms）；0 = 关闭。
-  // 默认 60s 打开：没有周期探测时，UI 里的"健康"只能反映上一次真实请求的结果，
-  // 而空闲路由可能早就死了（key 失效/模型下架）却一直显示正常——没有前瞻性。
-  // 探测发的是 maxTokens=1 的微型请求，且默认跳过付费条目（pingSkipPaid），成本可控。
-  pingIntervalMs: 60_000,
-  // 周期扫描是否跳过付费条目。默认 false：后备队列常常整条都是付费模型，
-  // 跳过付费 = 一行有颜色的状态都看不到（全是「未测」），「提前检测」就成了一句空话。
-  // 探测是 maxTokens=1 的微型请求，成本可忽略；真不想花配额可在设置页关掉。
-  pingSkipPaid: false,
-  // 一次性迁移：旧默认 true（跳过付费）会让全付费队列永远停在「未验证」，
-  // 升级时翻一次；用户之后自己改回去就永久尊重。
-  pingSkipPaidMigrated: false,
-  // 一次性迁移标记：老版本默认 0（关闭），而 settings 会把默认值也落盘，
-  // 所以「0」既可能是"用户故意关掉"也可能是"从没设置过"。升级时用这个键把关一次，
-  // 之后用户把间隔改回 0 就永久尊重，不再自动改。
-  pingDefaultsMigrated: false,
+  // 默认 0（关闭）：周期探测会向模型发**真实请求**，哪怕是 maxTokens=1 的微型请求，
+  // 也可能消耗配额/费用。默认打开等于替用户做花钱的决定，所以只在用户显式开启后
+  // 才轮询；需要前瞻性健康视图的用户到设置页把间隔调成 60000 即可。
+  pingIntervalMs: 0,
+  // 周期扫描是否跳过付费条目。默认 true（跳过）：付费模型的探测请求照样计费，
+  // 周期轮询每一轮都要付钱；用户想要"付费也一起探"可以在这里关掉跳过。
+  pingSkipPaid: true,
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -470,6 +462,37 @@ function createRouter(config, log) {
   }
 
   /**
+   * 探测成功**不等于**路由恢复——它只是"一条 1-token 的异形请求拿到了回话"。
+   *
+   * 为什么不能复用 recordSuccess：
+   *  - 熔断的判据是**真实请求**的失败。探测请求被厂商特殊对待（不计费、
+   *    不校验余额、甚至换个模型名都能过）时，它成功不代表真实请求能成。
+   *    曾经这里直接调 recordSuccess，导致已熔断的路由被一次 ping 洗回 closed：
+   *    熔断冷却期形同虚设、failures 被清零（阈值再也没法触发）、熔断原因被抹掉。
+   *  - 探测**失败**早就不动熔断器了（见 probeOne）；成功侧再改账本是自相矛盾。
+   *
+   * 现在的规则：
+   *  - half_open：允许推进回 closed —— 半开的定义就是"等一条成功证据"，
+   *    半开扫描 timer（probeRoute）就是靠它把半开路由救活的，这条能力必须保留。
+   *  - open：不动。冷却期（cooldownMs）保留，等它自然到期转半开。
+   *  - closed：不清 failures。探测不是真实请求，无权重置熔断计数。
+   */
+  function recordProbeSuccess(route) {
+    const c = circuitOf(keyOf(route));
+    if (c.state === CIRCUIT.HALF_OPEN) {
+      c.state = CIRCUIT.CLOSED;
+      c.failures = 0;
+      c.halfOpenAt = 0;
+      // 半开被救活 = 恢复正常，清掉旧账（与 recordSuccess 同一口径）
+      c.lastCode = null;
+      c.lastMessage = '';
+      c.retryAfterMs = 0;
+      c.lastSource = null;
+    }
+    touch();
+  }
+
+  /**
    * UI 指示器要显示的"实际生效路由"索引。
    * 优先级：最近一次真的发出去的请求 > 已挂起等待替换的路由。
    * -1 表示本次请求没被本插件覆盖（放行原配置）——此时 P1 才真的是"当前"。
@@ -547,6 +570,7 @@ function createRouter(config, log) {
     isAvailable,
     recordFailure,
     recordSuccess,
+    recordProbeSuccess,
     touch,
     pickFrom,
     positionAvailable,
@@ -1131,32 +1155,6 @@ export function apply(ctx, pluginConfig = {}) {
 
   const router = createRouter(config, ctx);
 
-  /**
-   * 一次性迁移：把周期探测的默认值从 0（关闭）升到 60s。
-   * 为什么需要迁移而不是只改 DEFAULT_CONFIG：settings 文档会把 schema 默认值一并落盘，
-   * 存量用户文档里已经写着 `pingIntervalMs: 0`，只改默认值永远轮不到生效。
-   * 用 pingDefaultsMigrated 把关一次：已经是正数的用户不动它；迁移后用户再改回 0 就永久尊重。
-   */
-  async function migratePingDefaults() {
-    if (config.pingDefaultsMigrated === true) return;
-    const patch = { pingDefaultsMigrated: true };
-    if (!(Number(config.pingIntervalMs) > 0)) patch.pingIntervalMs = DEFAULT_CONFIG.pingIntervalMs;
-    // 旧默认「跳过付费」会让整条付费队列永远显示未验证（用户报"面板全是未测，
-    // 提前检测根本不存在"就是这个）。升级时翻成「全探」一次，之后尊重用户设置。
-    if (config.pingSkipPaidMigrated !== true) {
-      patch.pingSkipPaid = DEFAULT_CONFIG.pingSkipPaid;
-      patch.pingSkipPaidMigrated = true;
-    }
-    Object.assign(config, patch);
-    await saveSettings(patch);
-    schedulePing();
-    ctx.logger?.info?.(
-      '[fallback-queue] ping defaults migrated → interval=%sms skipPaid=%s',
-      config.pingIntervalMs,
-      config.pingSkipPaid,
-    );
-  }
-
   // ---- 路由预检：启动时 + 适配器拓扑变化时，核对队列里的 provider 是否真的存在 ----
   // 没有这一步时，"provider 被卸载/改名/模型下架"只能等请求撞上 NO_ADAPTER、熔断
   // 计数走完才被发现；预检在装配期就判死并切走。llm 服务缺失（旧宿主/单测环境）
@@ -1328,7 +1326,9 @@ export function apply(ctx, pluginConfig = {}) {
       // 立刻中断探测流省 token（成功时尤其重要：我们只读了一个帧就走）
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
       if (verdict.ok) {
-        router.recordSuccess(route);
+        // 只写证据 + 最多把「半开」推进回闭合；**不**复活已熔断（open）的路由，
+        // 也**不**清掉 closed 状态下的失败计数（详见 recordProbeSuccess 的注释）。
+        router.recordProbeSuccess(route);
         stampProbe(true);
         ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
         return true;
@@ -1435,7 +1435,7 @@ export function apply(ctx, pluginConfig = {}) {
     const stale = router.staleHalfOpen();
     if (stale.length) void probeRoute(stale[0].route); // 一次探一条，串行推进
   }, 15_000);
-  // 周期全员 ping（默认 60s）。自排：**等这一轮真的跑完**再排下一轮。
+  // 周期全员 ping（默认关闭：pingIntervalMs=0）。自排：**等这一轮真的跑完**再排下一轮。
   // 旧实现在触发后立刻 schedulePing()（没有 await）——注释写着"不并发"，实际却
   // 在探测还飞着的时候就排好了下一轮。队列长时一轮全员探测很容易超过间隔，
   // 于是下一轮撞上 probingAll 守卫直接返回 {reason:'busy'}，等于白排一轮；
@@ -1716,16 +1716,12 @@ export function apply(ctx, pluginConfig = {}) {
     void (async () => {
       const legacyQueue = await loadSettings();
       await loadQueue(legacyQueue);
-      // 设置加载完之后再做一次性默认值迁移（依赖已落盘的配置值判断"是否从未设置过"）
-      await migratePingDefaults();
       // ⚠️ 必须在这里**无条件**再排一次周期探测。
       // apply 体里的 schedulePing()（前半区）跑在 loadSettings() 之前，那时
       // config.pingIntervalMs 还是 Config 默认值；而 settings 文档才是真源，
       // settings/document-updated 又只在 UI 保存时才触发。于是「配置文件里预置
       // pingIntervalMs: 60000、重启后从不保存」的路径永远排不上周期探测——
       // 用户实测 70 秒无任何探测（维护者评审必修 2）。
-      // migratePingDefaults() 只在首次迁移时调 schedulePing，已迁移用户会直接
-      // return，所以不能指望它兜底。
       schedulePing();
     })().catch((e) => ctx.logger?.warn?.('[fallback-queue] boot load failed: %s', e?.message));
   });
@@ -1761,9 +1757,4 @@ export const Config = s.object({
   failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
   pingIntervalMs: s.number().default(DEFAULT_CONFIG.pingIntervalMs).description('周期全员 ping 间隔毫秒（0=关闭）').volatile(),
   pingSkipPaid: s.boolean().default(DEFAULT_CONFIG.pingSkipPaid).description('周期扫描跳过付费条目（省配额）').volatile(),
-  pingDefaultsMigrated: s.boolean().default(DEFAULT_CONFIG.pingDefaultsMigrated).description('内部：周期探测默认值已完成一次性升级').volatile(),
-  // 必须显式声明：migratePingDefaults() 会把它写进 settings，但 schema 没这个键时
-  // 该值虽然能被落盘，却不经过校验/默认值投影——等于一个"匿名"字段。声明后它才是
-  // 正式的一次性迁移闸门（写一次 true，之后用户再改回"跳过付费"永久尊重）。
-  pingSkipPaidMigrated: s.boolean().default(DEFAULT_CONFIG.pingSkipPaidMigrated).description('内部：探测不再跳过付费的一次性升级已完成').volatile(),
 });

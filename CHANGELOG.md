@@ -2,6 +2,65 @@
 
 本项目更新日志按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] — 合并 PR #2，并统一默认值与熔断语义
+
+本版本合入 [#2](https://github.com/HelloQingTao/dsh-model-fallback-queue/pull/2)（厂商勾选批量入队 / 大保底置顶 / 免费付费标记 / 快速 ping 探测），
+并在合并时修掉四处**与 PR 描述不一致**或**会动用户数据**的问题。
+
+### 新增（来自 PR #2）
+
+- **厂商勾选批量入队**：模型选择器按厂商分组、复选框批量加入队列（先厂商、后组内序），已入队条目整行置灰防重复。
+- **大保底置顶（📌）**：标记的模型在**候选序**里恒排最后，永远最后兜底；不动物理下标，其余行的相对顺序不变（P1 槽 `-1` 不受影响）。
+- **免费/付费标记**：手动标注 `free`/`paid`，芯片与设置页同步显示（中性文字标签，不占颜色通道），纯展示、不参与排序。
+- **快速 ping 探测**：一键探测全队列可用性 + 可选周期探测；探测逐 chunk 判终态（`llm.stream` 从不抛错，失败是终态 `finish` chunk），不会把死路由刷绿；探测失败只记证据、不动熔断器。
+- **队列状态文件升级 v1 → v2**：新增 `pinned`/`paid`/`tier` 字段，读到旧文件自动补默认并写回一次（幂等）。
+- **换路由时剥离 `reasoningEffort`**（0.3.1 已述，本版一并收口）：配套新增 `capability` 失败分类——能力不匹配不熔断，但允许换路由救这一轮。
+
+### 修复
+
+**① 周期探测的默认值与迁移逻辑（与 PR 正文/规格/README 全部相反）**
+
+PR 描述写的是「周期探测默认关闭、默认跳过付费模型」，实际代码是「默认 60 秒一轮 + 默认全探（含付费）」，
+并且带一次性迁移 `migratePingDefaults()`，会把**用户显式写的 `pingIntervalMs: 0` 强制改成 60000**——
+等于替用户打开一个会持续消耗配额的开关。现已统一为：
+
+- `pingIntervalMs` 默认 `0`（关闭），要前瞻健康视图就在设置页填 `60000`；
+- `pingSkipPaid` 默认 `true`（跳过付费条目）；
+- **删除强制翻转存量设置的迁移**：`pingDefaultsMigrated` / `pingSkipPaidMigrated` 两个内部闸门一并移除，存量用户的设置保持原样。
+
+**② 探测成功会复活已熔断的路由（熔断只认真实请求）**
+
+探测是一条 `maxTokens=1` 的异形请求：厂商可能不计费、不校验余额。它成功不代表真实请求能成。
+原先探测成功直接调 `recordSuccess` → 无条件 `state = closed`，实测后果：
+
+- 已熔断（`open`）的路由被一次 ping 洗回闭合 → 冷却期形同虚设；
+- `failures` 被清零 → 连续失败永远攒不到阈值 → **熔断永远不触发**，插件的核心功能（自动故障转移）被削弱；
+- `lastCode`/`lastMessage` 被抹掉 → 排障证据丢失。
+
+现在探测成功只写健康证据（`lastProbeAt`/`probeOk`/`probeLatencyMs`/`lastOkAt`），
+**只有「半开」态才推进回闭合**（半开的定义就是"等一条成功证据"，半开扫描 timer 靠它救活路由，这条能力保留）；
+`open` 不动（冷却期保留），`closed` 不清 `failures`（探测不是真实请求，无权重置熔断计数）。
+面板上"刚探测成功却还是红色熔断"的困惑，悬浮提示里补了一句说明。
+
+**③ `npm test` 是红的，而且关键断言被静默跳过**
+
+`scripts/verify-execution.mjs` 的假 ctx 缺 `ctx.reflect.provide` → cordis `Service` 基类构造抛错 →
+`ctx.__service` 恒为 `undefined` → 依赖它的断言（正是「必修 1 / 必修 2 的运行时验证」）被 `if (svc)` 整块跳过，
+脚本却只报「7/9 项通过」，看上去有绿灯。补上这一行后：**44/44 全绿**。
+
+**④ 测试脚本会覆盖用户真实的队列文件**
+
+`verify-execution.mjs` 会调 `setQueue` → 插件把队列写到 `$DSH_HOME/fallback-queue-state.json`，
+而 `dsh-home-paths` 默认把 `DSH_HOME` 解析成真实的 `~/.dsh` → **跑一次测试就覆盖一次用户自己的后备队列**（无备份、无法从磁盘恢复）。
+现在脚本启动时把 `DSH_HOME` 指向一次性临时目录，测试只脏临时目录。
+
+### 其他
+
+- `package.json` 的 `files` 补上 `docs/feature-spec.md`（此前 PR 正文引用的规格文档不会进 npm 包）。
+- 移除 `.gitignore` 里与插件无关的 `.agent-teams/`（贡献者的 agent 状态），改为忽略本地安装留下的 `pnpm-lock.yaml`。
+- 下列 `0.2.10 / 0.2.11 / 0.2.12` 是 PR #2 合并前的**迭代记录，从未发布过**（npm 上的最新正式版是 0.2.6），
+  其中 0.2.10 描述的 `lastVerify` 验证回执已被后续「面板只给事实」的改动作废——保留仅为记录，不代表任何已发布版本。
+
 ## [0.3.1] — 换路由时剥离推理档位（修 `UNSUPPORTED_REASONING_EFFORT`）
 
 ### 修复
@@ -102,7 +161,7 @@ node --check index.js && node --check client.js && node --check state.js
 
 ---
 
-## [0.2.12] — 面板只说话不解释：切换真的生效没有，看真实请求
+## [0.2.12]（未发布 · PR #2 迭代记录）— 面板只说话不解释：切换真的生效没有，看真实请求
 
 ### 修复
 
@@ -126,6 +185,8 @@ node --check index.js && node --check client.js && node --check state.js
 用户的后备队列整条都是付费模型，而旧默认 `pingSkipPaid: true` 让周期探测把它们全跳过——面板上一片「未验证」，所谓「提前检测」根本不存在。
 - 默认改为 `pingSkipPaid: false`（全探），并加一次性迁移 `pingSkipPaidMigrated`，把存量的 `true` 翻一次；之后用户自己关回去就永久尊重。
 - 探测体去掉扩展字段 `name`（`{role:'user',content:'ping'}`），部分厂商会因扩展字段直接 400。
+- ⚠️ 勘误（见 0.3.2）：本条描述的「默认改为全探 + 一次性迁移 `pingSkipPaidMigrated`」已**全部撤回**——
+  现行默认是「周期探测关闭 + 默认跳过付费」，且不再有任何强制翻转存量设置的迁移。
 - 探测被厂商以 400/参数错误拒绝时记 `PROBE_UNSUPPORTED`，UI 显示灰色「未测」并注明「该厂商拒绝了探测请求，不代表模型不可用」——不再画成黄色风险。
 
 **④ 设置页**
@@ -137,7 +198,7 @@ node --check index.js && node --check client.js && node --check state.js
 
 - `node scripts/verify-health-colors.mjs`：105 项断言全过，其中 `requestLineText` 的 6 个状态与 `healthOf` 的 15 个状态是真跑代码，不是正则匹配。
 
-## [0.2.11] — 面板回归克制 · 探测不再自己熔断路由
+## [0.2.11]（未发布 · PR #2 迭代记录）— 面板回归克制 · 探测不再自己熔断路由
 
 ### 修复
 
@@ -164,7 +225,7 @@ node --check index.js && node --check client.js && node --check state.js
 - 离线渲染脚本把设置页在 Node 里渲染成文本树逐项断言（无长句、状态词正确、节标题唯一、三行队列齐全）。
 - `node scripts/verify-health-colors.mjs`：80 项断言全过。
 
-## [0.2.10] — 切换可验证 · 设置页不再静默失败
+## [0.2.10]（未发布 · PR #2 迭代记录）— 切换可验证 · 设置页不再静默失败
 
 ### 修复
 

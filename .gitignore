@@ -4,5 +4,6 @@ node_modules/
 .DS_Store
 dist/
 
-# AgentTeams internal state (do not commit)
-.agent-teams/
+# 插件是库，不需要自己的 lockfile（宿主 profile 负责依赖解析）；
+# 本地 pnpm 安装留下的这份不要提交，免得看起来像版本锁。
+pnpm-lock.yaml

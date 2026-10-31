@@ -24,6 +24,7 @@
     "LICENSE",
     "assets",
     "docs/design-plan.md",
+    "docs/feature-spec.md",
     "state.js"
   ],
   "license": "MIT",

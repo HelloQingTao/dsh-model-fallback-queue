@@ -66,6 +66,7 @@ window.__ModuleLoader__.load({
         infoHalfOpen: '当前状态：半开探测中，下一次请求会再试这条路由',
         infoRecoverAt: '预计恢复：{time}（冷却 {cooldown} 后转半开探测）',
         infoRecoverCooldown: '预计恢复：冷却 {cooldown} 后转半开探测',
+        infoProbeNotRelease: '探测成功不提前解除熔断：探测只是一条 1-token 的异形请求，熔断只认真实请求的成败。',
         infoRetryAfter: '上游建议：等待 {wait} 再试',
         parenWrap: '（{text}）',
         // 设置页
@@ -158,9 +159,9 @@ window.__ModuleLoader__.load({
         pickerTierHeader: '厂商：{name}',
         pickerNoneSelected: '请先勾选至少一个模型',
         probeSection: '周期健康探测',
-        pingInterval: '间隔（毫秒，0=关闭；默认 60000=每 60 秒确认一次）',
-        pingSkipPaid: '周期探测跳过付费模型（省配额；默认关闭 = 全都探）',
-        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens=1），可能产生少量调用；默认探测所有模型，想省配额可打开下面的跳过',
+        pingInterval: '间隔（毫秒，0=关闭；默认 0 = 不开启，填 60000 即每 60 秒一轮）',
+        pingSkipPaid: '周期探测跳过付费模型（省配额；默认开启 = 只探免费模型）',
+        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens=1），可能产生少量调用；默认不开启，需要前瞻健康视图时再填上面的间隔',
         queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
         // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
@@ -226,6 +227,7 @@ window.__ModuleLoader__.load({
         infoHalfOpen: 'Status: half-open probe — the next request will retry this route',
         infoRecoverAt: 'Recovers at: {time} (half-open probe after {cooldown} cooldown)',
         infoRecoverCooldown: 'Recovers after {cooldown} cooldown, then a half-open probe',
+        infoProbeNotRelease: 'A successful probe does not release the trip early: a probe is just a 1-token request — only real requests decide the circuit.',
         infoRetryAfter: 'Upstream advice: retry after {wait}',
         parenWrap: ' ({text})',
         loading: 'Loading…',
@@ -313,9 +315,9 @@ window.__ModuleLoader__.load({
         pickerTierHeader: 'Vendor: {name}',
         pickerNoneSelected: 'Check at least one model first',
         probeSection: 'Periodic health probe',
-        pingInterval: 'Interval (ms, 0 = off; default 60000 = check every 60s)',
-        pingSkipPaid: 'Skip paid models in periodic probes (saves quota; off by default = probe everything)',
-        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens=1) and may consume a little quota; every model is probed by default — enable the skip below to save quota',
+        pingInterval: 'Interval (ms, 0 = off; default 0 = disabled, enter 60000 for once a minute)',
+        pingSkipPaid: 'Skip paid models in periodic probes (saves quota; on by default = free models only)',
+        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens=1) and may consume a little quota; it stays off until you set an interval above',
         queueRowHint: '📌 = last-resort · colour = health (price is text only)',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
@@ -733,6 +735,11 @@ window.__ModuleLoader__.load({
           : t('infoRecoverCooldown', { cooldown: shortDuration(cooldown) }));
         if (Number(entry.retryAfterMs) > 0) {
           lines.push(t('infoRetryAfter', { wait: shortDuration(entry.retryAfterMs) }));
+        }
+        // 探测成功不解除熔断（只认真实请求）→ 用户看到"刚测过是好的，却还是红的"
+        // 时，这里说清楚为什么不冲突。
+        if (entry.probeOk === true) {
+          lines.push(t('infoProbeNotRelease'));
         }
       }
       return lines.join('\n');
@@ -1289,7 +1296,7 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
-        // F4 周期健康探测（默认开，60s；打开会有真实请求，给出成本警告）
+        // F4 周期健康探测（默认关，间隔 0；开启会有真实请求，给出成本警告）
         h(
           'div',
           null,
