@@ -2,6 +2,82 @@
 
 本项目更新日志按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.4] — 崩溃防护：异常不许逃到宿主
+
+### 修复
+
+插件跑在宿主进程里，所以「一个没人接的 promise」或「一个同步监听器直接抛」
+不是局部故障，是**整个 DSH 退出**。这条链上有三处漏洞，全部收口：
+
+**① 路由预检的 promise 没人接（最严重）**
+
+```js
+ctx.on('llm/adapters-updated', () => runPreflight('adapters-updated')); // 无 await / 无 catch
+setTimeout(() => runPreflight('boot'), 3000);
+```
+
+`runPreflight` 只对 `llm.listProviders()` 做了 try/catch，之后的 health 表读写、
+`sessionModelFor` 一旦抛错就变成未捕获 rejection。Node 24（Electron 44 自带）默认
+`--unhandled-rejections=throw`——宿主进程直接退出，用户看到的是「DSH 突然没了」。
+两个调用点统一改走 `preflightSafe()`，只记 warn。
+
+**② 同步监听器没有兜底**
+
+`session/event`、`session/disposed` 的 `throw` 会穿过宿主的事件派发链。包一层
+`safeListener()`：异常只记 warn，不回头炸 emit。
+
+**③ 半开扫描把 promise 丢了**
+
+```js
+if (stale.length) void probeRoute(stale[0].route);
+```
+
+`probeRoute` 只有 `finally`、没有 `catch`，`probeOne` 的异常会 rethrow —— `void` 一丢
+就是上面同一种未捕获 rejection。现在显式 `.catch()`，并给 `probeTimer` 补 `unref()`。
+
+### 测试
+
+`scripts/verify-execution.mjs` 新增 6 项断言，其中两项是**真喂畸形数据**（`data`/`id`
+的 getter 抛出）而不是读源码。做了反向对照：摘掉 `safeListener` 包层后，
+`✗ session/event 监听器异常不穿透到宿主 — boom-data` 立刻变红。
+
+总计 44/44 通过。
+
+## [0.3.3] — 探测失败必须说清「为什么失败」
+
+### 修复
+
+**① 面板把六种不同的失败折叠成同一个词「探测失败」**
+
+用户看到的是一排同名失败：`P2 探测失败`、`P4 探测失败`、`P5 探测失败`、`P7 探测失败`。
+真实原因各不相同——qodercn 两个模型是账号限流（免费额度耗尽，00:00 重置）、
+our-free-model 是上游 `Free usage limit reached`、ZJU 网关那条连不上。
+面板只给一个「探测失败」，错误码还藏在悬浮提示的尾巴里，于是最合理的猜测只剩
+「模型是不是没了」——这是最伤的一种猜错。
+
+现在 `healthOf()` 按 `probeError.code/message` 归因，主标签直接写原因：
+
+| 真实原因 | 主标签 |
+|---|---|
+| 账号额度耗尽（channel-pack `QUOTA_EXCEEDED`） | 额度用尽 · **1h36m后恢复** |
+| 上游免费池超额（`Free usage limit reached`） | 免费额度用尽 |
+| 429 / 限流 / 排队 | 被限流 |
+| `ECONNREFUSED` / 网关不可达 | 连不上 |
+| 探测超时 / abort | 探测超时 |
+| 密钥失效 / 401 / 403 | 鉴权失败 |
+| 其他 | 探测失败（原样保留） |
+
+**② 解锁时刻落地成倒计时**
+
+channel-pack 的原话里带着重置时间（`…最近一个将于 2026/10/30 00:00:00 解锁`）。
+宿主 `stampFailure()` 现在解析它并写入 `probeResetAt`，快照下发；客户端据此在右耳
+显示「1h36m后恢复」，不用让用户守到零点才发现已经好了。探测成功后该标记清除。
+解析不出时间就留 `null`，绝不猜一个时长。
+
+### 验证
+
+`npm test` 全通过：颜色/归因断言 **159/159**、执行链路断言 **38/38**。
+
 ## [0.3.1] — 换路由时剥离推理档位（修 `UNSUPPORTED_REASONING_EFFORT`）
 
 ### 修复

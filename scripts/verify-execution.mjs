@@ -337,6 +337,51 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
   }
 }
 
+// ================= 崩溃防护：异常不许逃到宿主 =================
+// 背景：插件里凡"没人接的 promise / 同步监听器直接抛"都是**整个宿主进程退出**
+// 级别的故障（Node 24 默认 --unhandled-rejections=throw）。代码看起来完全正常，
+// 只在于某次数据异常时才炸——所以必须真的把它喂进去，看会不会穿出来。
+{
+  const xllm = makeLlm();
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0 }, xllm);
+  mod.apply(ctx, { enabled: true });
+  await new Promise((r) => setTimeout(r, 120));
+
+  // ① session/event：payload 的 data 取景抛出（模拟宿主给了畸形事件）
+  let escaped = null;
+  const evilEvent = { type: 'model/selection' };
+  Object.defineProperty(evilEvent, 'data', {
+    get() { throw new Error('boom-data'); },
+  });
+  try {
+    hooks['session/event']?.({ id: 'sess-evil' }, evilEvent);
+  } catch (e) {
+    escaped = e;
+  }
+  ok('session/event 监听器异常不穿透到宿主', escaped === null, escaped?.message || '');
+
+  // ② session/disposed：session.id 取值抛出
+  let escaped2 = null;
+  const evilSession = {};
+  Object.defineProperty(evilSession, 'id', {
+    get() { throw new Error('boom-id'); },
+  });
+  try {
+    hooks['session/disposed']?.(evilSession);
+  } catch (e) {
+    escaped2 = e;
+  }
+  ok('session/disposed 监听器异常不穿透到宿主', escaped2 === null, escaped2?.message || '');
+
+  // ③ 源码守卫：后台探测不得再把 promise 丢掉；probeTimer 必须 unref
+  const src = await import('node:fs').then((m) => m.readFileSync(join(root, 'index.js'), 'utf8'));
+  ok('index.js 不再有 `void probeRoute(`（会把 rejection 丢成未捕获）', !/void\s+probeRoute\s*\(/.test(src));
+  ok('index.js 不再有裸 `void probeAllRoutes(`', !/void\s+probeAllRoutes\s*\(/.test(src));
+  ok('probeTimer 已 unref（不拖住进程退出）', /probeTimer\.unref/.test(src));
+  ok('预检两个调用点走 preflightSafe（含 .catch 收口）',
+    (src.match(/preflightSafe\(/g) || []).length >= 3);
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
 if (failed.length) {

@@ -376,6 +376,8 @@ function createRouter(config, log) {
         // 只由主动探测写入。UI 靠它们区分「刚测过·820ms」「很久没测过」「上次探测失败」，
         // 而不是只凭熔断状态猜——熔断是事后记账，本身没有预测能力。
         lastOkAt: 0, lastProbeAt: 0, probeLatencyMs: 0, probeOk: null,
+        // 探测失败时上游给出的「解锁时刻」（ms）：不限流/无明确时刻时为 0。
+        probeResetAt: 0,
         // 探测自己的失败原因：探测不再写熔断器，所以原因要单独留一份给 UI 的悬浮提示
         lastProbeCode: null, lastProbeMessage: '',
       };
@@ -834,6 +836,8 @@ function createRouter(config, log) {
           probeOk: c.probeOk === null || c.probeOk === undefined ? null : c.probeOk === true,
           // 上次探测的失败原因（探测不写熔断器，所以单独下发）
           probeError: c.lastProbeCode ? { code: c.lastProbeCode, message: c.lastProbeMessage || null } : null,
+          // 已知解锁时刻（限流）→ 前端用它算倒计时；不知道就是 null，不编一个。
+          probeResetAt: c.probeResetAt || null,
         };
       };
       return {
@@ -1173,10 +1177,29 @@ export function apply(ctx, pluginConfig = {}) {
       );
     }
   }
-  ctx.effect(() => ctx.on('llm/adapters-updated', () => runPreflight('adapters-updated')));
+  // 这两个调用点过去既不 await 也不 catch：runPreflight 内部只兜住了 listProviders，
+  // 之后的 health 表读写 / sessionModelFor 一旦抛错就是一条未捕获的 rejection ——
+  // Node 24 默认 --unhandled-rejections=throw，会让宿主进程直接退出。统一收口在这里。
+  function preflightSafe(trigger) {
+    runPreflight(trigger).catch((e) => {
+      ctx.logger?.warn?.('[fallback-queue] preflight(%s) failed: %s', trigger, e?.message);
+    });
+  }
+  // 同步监听器同样不能把异常抛回宿主的事件派发链：一个 throw 会穿过去炸掉整轮请求。
+  function safeListener(fn) {
+    return (...args) => {
+      try {
+        return fn(...args);
+      } catch (e) {
+        ctx.logger?.warn?.('[fallback-queue] listener failed: %s', e?.message);
+        return undefined;
+      }
+    };
+  }
+  ctx.effect(() => ctx.on('llm/adapters-updated', () => preflightSafe('adapters-updated')));
   // 启动预检要等适配器注册完成，adapters-updated 事件天然覆盖（xdpool 等注册完会触发）。
   // 兜底：启动后 3s 再跑一次，防宿主不派发该事件。
-  const preflightTimer = setTimeout(() => runPreflight('boot'), 3000);
+  const preflightTimer = setTimeout(() => preflightSafe('boot'), 3000);
 
   // ---- 会话模型实时跟随 ----
   // 用户手动切模型时宿主派发 session/event {type:'model/selection', data:{provider,model,...}}
@@ -1184,7 +1207,7 @@ export function apply(ctx, pluginConfig = {}) {
   // 原方案只靠 P1 放行采样（agent/request 瀑布），手动切换后没发消息就是旧值。
   // 这里监听 selection 事件直接更新 router.sessionModel，UI 3s 轮询即可跟上。
   ctx.effect(() =>
-    ctx.on('session/event', (session, event) => {
+    ctx.on('session/event', safeListener((session, event) => {
       if (event?.type !== 'model/selection') return;
       const d = event.data || {};
       if (!d.provider || !d.model) return;
@@ -1214,7 +1237,7 @@ export function apply(ctx, pluginConfig = {}) {
       router.retryFromP1(sessionId);
       ctx.logger?.info?.('[fallback-queue] session model changed: %s/%s', d.provider, d.model);
       router.touch();
-    }),
+    })),
   );
 
   // ---- 会话数据清理 ----
@@ -1222,9 +1245,9 @@ export function apply(ctx, pluginConfig = {}) {
   // 防止 sessionCursor Map 随历史会话数无限增长。游标是我们唯一按会话记的运行态；
   // 熔断/判死按 provider/model 记账，与会话无关，不需要清理。
   ctx.effect(() =>
-    ctx.on('session/disposed', (session) => {
+    ctx.on('session/disposed', safeListener((session) => {
       router.dropSession(session?.id);
-    }),
+    })),
   );
 
   // ---- 主动探测 ----
@@ -1250,7 +1273,10 @@ export function apply(ctx, pluginConfig = {}) {
       c.probeLatencyMs = Date.now() - startedAt;
       c.probeOk = ok;
       c.lastAttemptAt = Date.now();
-      if (ok) c.lastOkAt = Date.now();
+      if (ok) {
+        c.lastOkAt = Date.now();
+        c.probeResetAt = 0; // 探活了：之前的限流/解锁时刻作废
+      }
     };
     // 探测失败记账（只记证据，不动熔断器）。
     const stampFailure = (code, message, probeOk = false) => {
@@ -1258,6 +1284,13 @@ export function apply(ctx, pluginConfig = {}) {
       c.probeOk = probeOk;
       c.lastProbeCode = code;
       c.lastProbeMessage = message || '';
+      // 上游若给了明确解锁时刻（channel-pack 原话：「…最近一个将于 2026/10/30 00:00:00
+      // 解锁」），就把它记下来：前端能直接显示「1h37m 后恢复」，而不是让用户
+      // 对着「探测失败」守到零点。解析不出时间就清 0，绝不猜一个时长。
+      const resetHit = /(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(String(message || ''));
+      c.probeResetAt = resetHit
+        ? new Date(+resetHit[1], +resetHit[2] - 1, +resetHit[3], +resetHit[4], +resetHit[5], +(resetHit[6] || 0)).getTime()
+        : 0;
       // ⚠️ 失败也必须记时间戳。旧实现只记错误码不记 lastProbeAt，而前端判
       // 「有没有证据」看的正是这个字段——于是「探测失败」和「从没探测过」在
       // 界面上长得一模一样（都是灰「未测」）。用户点完「探测全部」看到一片
@@ -1432,9 +1465,21 @@ export function apply(ctx, pluginConfig = {}) {
     return { ok: true, results };
   }
   const probeTimer = setInterval(() => {
-    const stale = router.staleHalfOpen();
-    if (stale.length) void probeRoute(stale[0].route); // 一次探一条，串行推进
+    try {
+      const stale = router.staleHalfOpen();
+      if (!stale.length) return;
+      // 一次探一条，串行推进。注意 probeRoute 只有 finally、没有 catch，probeOne 的
+      // 异常会 rethrow；早先用裸 `void` 丢掉这个 promise → 变成未捕获 rejection →
+      // Node 24 默认 throw → 宿主进程退出。这里必须显式接住。
+      probeRoute(stale[0].route).catch((e) => {
+        ctx.logger?.warn?.('[fallback-queue] half-open probe failed: %s', e?.message);
+      });
+    } catch (e) {
+      ctx.logger?.warn?.('[fallback-queue] probe tick failed: %s', e?.message);
+    }
   }, 15_000);
+  // 后台探测计时器不该成为阻止进程退出的理由（dispose 里另有 clearInterval）
+  if (probeTimer.unref) probeTimer.unref();
   // 周期全员 ping（默认 60s）。自排：**等这一轮真的跑完**再排下一轮。
   // 旧实现在触发后立刻 schedulePing()（没有 await）——注释写着"不并发"，实际却
   // 在探测还飞着的时候就排好了下一轮。队列长时一轮全员探测很容易超过间隔，

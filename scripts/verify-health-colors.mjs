@@ -177,6 +177,9 @@ const keys = [
   'healthOk', 'healthSlow', 'healthProbeFailed', 'healthUnprobed', 'healthUnprobedHint',
   'healthSkipPaidHint', 'healthStale', 'healthAgo', 'healthProbeMs', 'healthVerifying',
   'healthRecoverIn', 'healthUnknown', 'healthProbeUnsupported',
+  // 探测失败的归因文案：缺一个键，面板上就退回那句没信息量的「探测失败」
+  'healthQuota', 'healthFreeQuota', 'healthRateLimited', 'healthUnreachable',
+  'healthProbeTimeout', 'healthAuthFail',
   'reqSent', 'reqOk', 'reqFail', 'reqNone', 'pendingConfirm',
 ];
 const zhStart = client.indexOf('      zh: {');
@@ -274,6 +277,27 @@ check('探测被拒显示为未测（灰）',
   healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: null, probeError: { code: 'PROBE_UNSUPPORTED' } }, snap, now).tone === 'muted');
 check('探测被拒的解释说明不影响可用性',
   healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: null, probeError: { code: 'PROBE_UNSUPPORTED' } }, snap, now).detail === 'healthProbeUnsupportedHint');
+
+// ---------- 8. 探测失败必须说清「为什么失败」 ----------
+// 用户原话："无论是手动探测全部还是自动，都显示有问题，到底是显示有问题还是没探测"。
+// 根因是归因缺失：额度用尽（等到点自己恢复）、免费池超额、网关连不上、密钥失效
+// 在面板上完全是同一个词，用户只能猜成"模型被删了"。下面把归因矩阵钉死。
+const probeFailed = (err) => healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: false, probeError: err }, snap, now);
+const quotaCase = probeFailed({ code: 'QUOTA_EXCEEDED', message: 'X：模型 gfmodel 的可用账号均在限流中，最近一个将于 2026/10/30 00:00:00 解锁。' });
+check('额度用尽 → 主标签直接写原因', quotaCase.text === 'healthQuota', quotaCase.text);
+check('额度用尽 → 右耳给解锁倒计时', /healthRecoverIn/.test(quotaCase.short), quotaCase.short);
+check('额度用尽 → 悬浮提示保留上游原话', quotaCase.detail.includes('解锁'), quotaCase.detail);
+const freeCase = probeFailed({ code: 'THROTTLED', message: 'Free usage limit reached. Free models work in OpenCode' });
+check('免费池超额 → 单独文案', freeCase.text === 'healthFreeQuota', freeCase.text);
+const netCase = probeFailed({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:1234' });
+check('网关连不上 → 单独文案', netCase.text === 'healthUnreachable', netCase.text);
+const authCase = probeFailed({ code: 'AUTH', message: 'invalid api key' });
+check('钥匙失效 → 单独文案', authCase.text === 'healthAuthFail', authCase.text);
+const unknownCase = probeFailed({ code: 'WEIRD', message: 'boom' });
+check('无法归因时退回「探测失败」', unknownCase.text === 'healthProbeFailed', unknownCase.text);
+check('没有解锁时刻时不编倒计时', !/healthRecoverIn/.test(unknownCase.short), unknownCase.short);
+check('宿主下发 probeResetAt', /probeResetAt: c\.probeResetAt/.test(index));
+check('探测成功清掉解锁时刻', /c\.probeResetAt = 0;/.test(index));
 
 if (failures.length) {
   console.error(`✗ ${failures.length} 项失败 / ${pass + failures.length} 项`);

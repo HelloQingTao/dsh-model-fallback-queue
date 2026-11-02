@@ -179,6 +179,14 @@ window.__ModuleLoader__.load({
         healthUnknown: '未知',
         healthProbeUnsupported: '探测被拒',
         healthProbeUnsupportedHint: '该厂商拒绝了探测请求，不代表模型不可用（真实请求才是证据）',
+        // 探测失败的「原因」必须能落到主标签上：额度用尽、免费池超额、网关连不上、
+        // 钥匙失效在面板上长得一模一样时，用户只能猜"模型被删了"——那是最伤的一种猜错。
+        healthQuota: '额度用尽',
+        healthFreeQuota: '免费额度用尽',
+        healthRateLimited: '被限流',
+        healthUnreachable: '连不上',
+        healthProbeTimeout: '探测超时',
+        healthAuthFail: '鉴权失败',
         // 面板唯一的事实行：上一轮真实请求走了哪条、结果如何。
         // 这是「切换到底生效没有」的答案——不是探测，也不是游标。
         reqSent: '上一轮：{label} · 已发出',
@@ -332,6 +340,12 @@ window.__ModuleLoader__.load({
         healthUnknown: 'unknown',
         healthProbeUnsupported: 'Probe rejected',
         healthProbeUnsupportedHint: 'This provider rejects probe requests; that does not mean the model is unusable (only real requests prove it)',
+        healthQuota: 'Quota used up',
+        healthFreeQuota: 'Free quota used up',
+        healthRateLimited: 'Rate limited',
+        healthUnreachable: 'Unreachable',
+        healthProbeTimeout: 'Probe timeout',
+        healthAuthFail: 'Auth failed',
         reqSent: 'Last request: {label} · sent',
         reqOk: 'Last request: {label} · ok · {ago} ago',
         reqFail: 'Last request: {label} · failed · {code}',
@@ -845,12 +859,34 @@ window.__ModuleLoader__.load({
       }
       // 最近一次证据是"探测失败"（还没到熔断阈值）→ 黄：有风险，但还没被判死
       if (e.probeOk === false && probedAt >= okAt) {
-        const code = e.probeError?.code ? ` · ${e.probeError.code}` : '';
+        const code = String(e.probeError?.code || '');
+        const msg = String(e.probeError?.message || '');
+        // 只写「探测失败」等于什么都没说：额度用尽（等到点自己恢复）、免费池超额、
+        // 密钥失效、网关连不上，在这格上是同一个词。用户看到一排同名失败，只能猜
+        // "模型被删了"。按 code/message 分类成可行动的原因，完整原话进悬浮提示。
+        const blob = `${code} ${msg}`;
+        let reasonKey = 'healthProbeFailed';
+        if (/free usage limit|free models work in opencode|free quota/i.test(msg)) reasonKey = 'healthFreeQuota';
+        else if (/quota|额度|余额|积分/i.test(blob)) reasonKey = 'healthQuota';
+        else if (/rate.?limit|too many requests|429|限流|限速|排队/i.test(blob)) reasonKey = 'healthRateLimited';
+        else if (/econnrefused|enotfound|eai_again|econnreset|etimedout|fetch failed|network|connection|连不上/i.test(blob)) reasonKey = 'healthUnreachable';
+        else if (/timeout|aborted/i.test(code)) reasonKey = 'healthProbeTimeout';
+        else if (/auth|api.?key|unauth|forbidden|401|403|鉴权|认证/i.test(blob)) reasonKey = 'healthAuthFail';
+        // 上游给了明确解锁时刻（channel-pack 原话：…将于 2026/10/30 00:00:00 解锁）
+        // → 右耳直接给倒计时，不用让用户守到零点才发现已经恢复。
+        const hit = /(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(msg);
+        let resetShort = '';
+        if (hit) {
+          const at = new Date(+hit[1], +hit[2] - 1, +hit[3], +hit[4], +hit[5], +(hit[6] || 0)).getTime();
+          if (Number.isFinite(at) && at > now) resetShort = t('healthRecoverIn', { age: fmtAge(at - now) });
+        }
         return {
           tone: 'warn',
-          text: t('healthProbeFailed'),
-          detail: `${t('healthAgo', { age: fmtAge(age) })}${code}`,
-          short: t('healthAgo', { age: fmtAge(age) }),
+          text: t(reasonKey),
+          detail: [t('healthAgo', { age: fmtAge(age) }), code, msg.length > 160 ? `${msg.slice(0, 160)}…` : msg]
+            .filter(Boolean)
+            .join(' · '),
+          short: resetShort || t('healthAgo', { age: fmtAge(age) }),
         };
       }
       // 探测周期开着时，超过 3 个周期（至少 3 分钟）没有新证据就降级成灰色：
