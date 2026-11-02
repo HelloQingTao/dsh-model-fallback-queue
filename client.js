@@ -66,7 +66,7 @@ window.__ModuleLoader__.load({
         infoHalfOpen: '当前状态：半开探测中，下一次请求会再试这条路由',
         infoRecoverAt: '预计恢复：{time}（冷却 {cooldown} 后转半开探测）',
         infoRecoverCooldown: '预计恢复：冷却 {cooldown} 后转半开探测',
-        infoProbeNotRelease: '探测成功不提前解除熔断：探测只是一条 1-token 的异形请求，熔断只认真实请求的成败。',
+        infoProbeNotRelease: '探测成功不提前解除熔断：探测只是一条精简的异形请求，熔断只认真实请求的成败（用「验证」按钮发真实请求才作数）。',
         infoRetryAfter: '上游建议：等待 {wait} 再试',
         parenWrap: '（{text}）',
         // 设置页
@@ -161,7 +161,17 @@ window.__ModuleLoader__.load({
         probeSection: '周期健康探测',
         pingInterval: '间隔（毫秒，0=关闭；默认 0 = 不开启，填 60000 即每 60 秒一轮）',
         pingSkipPaid: '周期探测跳过付费模型（省配额；默认开启 = 只探免费模型）',
-        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens=1），可能产生少量调用；默认不开启，需要前瞻健康视图时再填上面的间隔',
+        pingMaxTokens: '探测请求 maxTokens（默认 8；部分网关会拒绝过小的值，改大更保险）',
+        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens 见上，默认 8），可能产生少量调用；默认不开启，需要前瞻健康视图时再填上面的间隔',
+        // 「用真实请求验证」：探测体再调也是刻意精简的请求，网关按形状挑剔时它测不出来；
+        // 这一项直接发一条和真实对话同形的请求，代价是花 token，所以只手动触发。
+        verifyReal: '验证',
+        verifyRealTitle: '用一条真实请求验证这条路由（会消耗少量 token）',
+        verifyRealBusy: '上一条验证还没结束，稍等再点',
+        verifyRealOk: '✓ {pos} 真实请求通过 · {ms}ms{out}',
+        verifyRealOkOut: ' · 输出 {n} token',
+        verifyRealFail: '✕ {pos} 真实请求失败 · {code}',
+        verifyRealRejected: '✕ {pos} 真实请求被拒（{code}）：{msg}',
         queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
         // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
@@ -180,6 +190,14 @@ window.__ModuleLoader__.load({
         healthUnknown: '未知',
         healthProbeUnsupported: '探测被拒',
         healthProbeUnsupportedHint: '该厂商拒绝了探测请求，不代表模型不可用（真实请求才是证据）',
+        // 探测失败的「原因」必须能落到主标签上：额度用尽、免费池超额、网关连不上、
+        // 钥匙失效在面板上长得一模一样时，用户只能猜"模型被删了"——那是最伤的一种猜错。
+        healthQuota: '额度用尽',
+        healthFreeQuota: '免费额度用尽',
+        healthRateLimited: '被限流',
+        healthUnreachable: '连不上',
+        healthProbeTimeout: '探测超时',
+        healthAuthFail: '鉴权失败',
         // 面板唯一的事实行：上一轮真实请求走了哪条、结果如何。
         // 这是「切换到底生效没有」的答案——不是探测，也不是游标。
         reqSent: '上一轮：{label} · 已发出',
@@ -227,7 +245,7 @@ window.__ModuleLoader__.load({
         infoHalfOpen: 'Status: half-open probe — the next request will retry this route',
         infoRecoverAt: 'Recovers at: {time} (half-open probe after {cooldown} cooldown)',
         infoRecoverCooldown: 'Recovers after {cooldown} cooldown, then a half-open probe',
-        infoProbeNotRelease: 'A successful probe does not release the trip early: a probe is just a 1-token request — only real requests decide the circuit.',
+        infoProbeNotRelease: 'A successful probe does not release the trip early: a probe is still a trimmed-down request — only a real request decides the circuit (use the “Verify” button for that).',
         infoRetryAfter: 'Upstream advice: retry after {wait}',
         parenWrap: ' ({text})',
         loading: 'Loading…',
@@ -317,7 +335,15 @@ window.__ModuleLoader__.load({
         probeSection: 'Periodic health probe',
         pingInterval: 'Interval (ms, 0 = off; default 0 = disabled, enter 60000 for once a minute)',
         pingSkipPaid: 'Skip paid models in periodic probes (saves quota; on by default = free models only)',
-        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens=1) and may consume a little quota; it stays off until you set an interval above',
+        pingMaxTokens: 'Probe request maxTokens (default 8; some gateways reject very small values)',
+        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens per above, default 8) and may consume a little quota; it stays off until you set an interval above',
+        verifyReal: 'Verify',
+        verifyRealTitle: 'Verify this route with one real request (costs a few tokens)',
+        verifyRealBusy: 'a previous verification is still running, retry in a moment',
+        verifyRealOk: '✓ {pos} real request ok · {ms}ms{out}',
+        verifyRealOkOut: ' · {n} output tokens',
+        verifyRealFail: '✕ {pos} real request failed · {code}',
+        verifyRealRejected: '✕ {pos} real request rejected ({code}): {msg}',
         queueRowHint: '📌 = last-resort · colour = health (price is text only)',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
@@ -334,6 +360,12 @@ window.__ModuleLoader__.load({
         healthUnknown: 'unknown',
         healthProbeUnsupported: 'Probe rejected',
         healthProbeUnsupportedHint: 'This provider rejects probe requests; that does not mean the model is unusable (only real requests prove it)',
+        healthQuota: 'Quota used up',
+        healthFreeQuota: 'Free quota used up',
+        healthRateLimited: 'Rate limited',
+        healthUnreachable: 'Unreachable',
+        healthProbeTimeout: 'Probe timeout',
+        healthAuthFail: 'Auth failed',
         reqSent: 'Last request: {label} · sent',
         reqOk: 'Last request: {label} · ok · {ago} ago',
         reqFail: 'Last request: {label} · failed · {code}',
@@ -852,12 +884,34 @@ window.__ModuleLoader__.load({
       }
       // 最近一次证据是"探测失败"（还没到熔断阈值）→ 黄：有风险，但还没被判死
       if (e.probeOk === false && probedAt >= okAt) {
-        const code = e.probeError?.code ? ` · ${e.probeError.code}` : '';
+        const code = String(e.probeError?.code || '');
+        const msg = String(e.probeError?.message || '');
+        // 只写「探测失败」等于什么都没说：额度用尽（等到点自己恢复）、免费池超额、
+        // 密钥失效、网关连不上，在这格上是同一个词。用户看到一排同名失败，只能猜
+        // "模型被删了"。按 code/message 分类成可行动的原因，完整原话进悬浮提示。
+        const blob = `${code} ${msg}`;
+        let reasonKey = 'healthProbeFailed';
+        if (/free usage limit|free models work in opencode|free quota/i.test(msg)) reasonKey = 'healthFreeQuota';
+        else if (/quota|额度|余额|积分/i.test(blob)) reasonKey = 'healthQuota';
+        else if (/rate.?limit|too many requests|429|限流|限速|排队/i.test(blob)) reasonKey = 'healthRateLimited';
+        else if (/econnrefused|enotfound|eai_again|econnreset|etimedout|fetch failed|network|connection|连不上/i.test(blob)) reasonKey = 'healthUnreachable';
+        else if (/timeout|aborted/i.test(code)) reasonKey = 'healthProbeTimeout';
+        else if (/auth|api.?key|unauth|forbidden|401|403|鉴权|认证/i.test(blob)) reasonKey = 'healthAuthFail';
+        // 上游给了明确解锁时刻（channel-pack 原话：…将于 2026/10/30 00:00:00 解锁）
+        // → 右耳直接给倒计时，不用让用户守到零点才发现已经恢复。
+        const hit = /(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(msg);
+        let resetShort = '';
+        if (hit) {
+          const at = new Date(+hit[1], +hit[2] - 1, +hit[3], +hit[4], +hit[5], +(hit[6] || 0)).getTime();
+          if (Number.isFinite(at) && at > now) resetShort = t('healthRecoverIn', { age: fmtAge(at - now) });
+        }
         return {
           tone: 'warn',
-          text: t('healthProbeFailed'),
-          detail: `${t('healthAgo', { age: fmtAge(age) })}${code}`,
-          short: t('healthAgo', { age: fmtAge(age) }),
+          text: t(reasonKey),
+          detail: [t('healthAgo', { age: fmtAge(age) }), code, msg.length > 160 ? `${msg.slice(0, 160)}…` : msg]
+            .filter(Boolean)
+            .join(' · '),
+          short: resetShort || t('healthAgo', { age: fmtAge(age) }),
         };
       }
       // 探测周期开着时，超过 3 个周期（至少 3 分钟）没有新证据就降级成灰色：
@@ -962,6 +1016,9 @@ window.__ModuleLoader__.load({
       // F4 探测全部：进行中 + 结果提示
       const [probing, setProbing] = React.useState(false);
       const [probeNote, setProbeNote] = React.useState(null);
+      // 「用真实请求验证」：正在验证的行索引（null = 空闲）与该行的回执文案
+      const [verifying, setVerifying] = React.useState(null);
+      const [verifyNote, setVerifyNote] = React.useState(null);
       // 相对时间刷新器：设置页不轮询快照，不 tick 的话"12s前"会冻住不更新。
       const [, setClockTick] = React.useState(0);
       React.useEffect(() => {
@@ -970,6 +1027,8 @@ window.__ModuleLoader__.load({
       }, []);
       // 周期探测间隔的本地草稿（null = 跟随服务端值）
       const [pingDraft, setPingDraft] = React.useState(null);
+      // 探测体 maxTokens 的本地草稿（同样的理由：每敲一下就落盘会把输入顶回旧值）
+      const [pingTokensDraft, setPingTokensDraft] = React.useState(null);
 
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
@@ -1009,6 +1068,15 @@ window.__ModuleLoader__.load({
         if (raw === null) return;
         const v = Math.max(0, Math.floor(Number(raw) || 0));
         if (v !== (Number(cfg.pingIntervalMs) || 0)) void patch({ pingIntervalMs: v });
+      };
+
+      // 探测体 maxTokens：1..512 之外的值没有意义（1 是历史默认，部分网关会拒）
+      const commitPingTokens = () => {
+        const raw = pingTokensDraft;
+        setPingTokensDraft(null);
+        if (raw === null) return;
+        const v = Math.max(1, Math.min(512, Math.floor(Number(raw) || 8)));
+        if (v !== (Number(cfg.pingMaxTokens) || 8)) void patch({ pingMaxTokens: v });
       };
 
       // 队列写路径：只落 state 文件，不碰 settings，因此不会触发宿主主题全量重算
@@ -1085,6 +1153,47 @@ window.__ModuleLoader__.load({
         // 而实际上（必修 1 的参数不匹配）每次点击都被网关拒绝了。
         const reason = r?.reason || 'unknown';
         setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
+      };
+
+      /**
+       * 「用真实请求验证」某一条（S1）：发一条和真实对话同形的请求，而不是微型探测体。
+       * 为什么单独一个按钮：探测体再怎么调都是刻意精简的请求，网关按形状挑剔时它测不出
+       * 真相；只有真实请求才算证据。代价是真的花 token，所以只手动点，不进周期扫描。
+       */
+      const verifyRow = async (i) => {
+        if (verifying !== null) {
+          setVerifyNote(t('verifyRealBusy'));
+          return;
+        }
+        const pos = cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`;
+        setVerifying(i);
+        setVerifyNote(null);
+        setErr(null);
+        try {
+          const r = await host.probeReal(i);
+          await refresh(); // 证据字段（lastOkAt/probeOk…）会变，徽章要跟着重画
+          // r.ok 只表示"验证跑完了"，路由行不行看 r.receipt.ok——两者不能混。
+          if (!r?.ok) {
+            const reason = r?.reason || 'unknown';
+            setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
+            return;
+          }
+          const rc = r.receipt || {};
+          if (rc.ok) {
+            const outN = rc.usage?.outputTokens ?? rc.usage?.output_tokens ?? rc.usage?.completion_tokens;
+            const out = Number.isFinite(Number(outN))
+              ? t('verifyRealOkOut', { n: Number(outN) })
+              : '';
+            setVerifyNote(t('verifyRealOk', { pos, ms: rc.latencyMs ?? '?', out }));
+          } else if (rc.rejected) {
+            const msg = String(rc.message || '').slice(0, 120);
+            setVerifyNote(t('verifyRealRejected', { pos, code: rc.code || 'UNKNOWN', msg }));
+          } else {
+            setVerifyNote(t('verifyRealFail', { pos, code: rc.code || 'UNKNOWN' }));
+          }
+        } finally {
+          setVerifying(null);
+        }
       };
 
       const modes = [
@@ -1175,6 +1284,19 @@ window.__ModuleLoader__.load({
                       },
                       t('switchBtn'),
                     ),
+                    // S1：用真实请求验证这一条。探测体是刻意精简的请求，遇到按形状挑剔的
+                    // 网关时"探测失败"不能证明模型不可用；这个按钮发一条真正常规请求。
+                    h(
+                      'button',
+                      {
+                        onClick: () => { void verifyRow(i); },
+                        disabled: verifying !== null,
+                        title: verifying === i ? t('verifyRealBusy') : t('verifyRealTitle'),
+                        'aria-label': t('verifyReal'),
+                        style: verifying !== null ? btnSmallDisabled : btnSmall,
+                      },
+                      verifying === i ? '…' : t('verifyReal'),
+                    ),
                     // F2：大保底 PIN 开关
                     h(
                       'button',
@@ -1256,6 +1378,18 @@ window.__ModuleLoader__.load({
                   ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
                   : probeNote)
             : null,
+          // 「用真实请求验证」的回执：通过/失败的结论必须落在屏幕上，不能只进展。
+          verifyNote
+            ? h('div', {
+                style: {
+                  fontSize: 11,
+                  marginTop: 2,
+                  color: verifyNote.startsWith('✓')
+                    ? 'var(--dsw-alias-state-success-primary, #2f8f4e)'
+                    : 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+                },
+              }, verifyNote)
+            : null,
           // 切换的真实性在面板里看（上一轮真实请求走了哪条），设置页不重复占位。
         ),
         // 回切策略
@@ -1320,6 +1454,22 @@ window.__ModuleLoader__.load({
             h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
               h(Switch, { checked: cfg.pingSkipPaid !== false, onChange: (v) => patch({ pingSkipPaid: v }), label: '' }),
               t('pingSkipPaid'),
+            ),
+            // 探测体大小：太小（尤其是历史默认 1）会被一部分网关直接 400 拒绝，
+            // 于是"能正常对话的模型"长期显示探测失败——这个值就是给那种情况留的旋钮。
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
+              h('input', {
+                type: 'number',
+                min: 1,
+                max: 512,
+                step: 1,
+                value: pingTokensDraft === null ? (Number(cfg.pingMaxTokens) || 8) : pingTokensDraft,
+                onChange: (e) => setPingTokensDraft(e.target.value),
+                onBlur: commitPingTokens,
+                onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
+                style: { width: 90, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
+              }),
+              t('pingMaxTokens'),
             ),
             h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-state-warn-primary, #c98a1b)' } }, t('pingCostWarn')),
           ),
@@ -2213,6 +2363,17 @@ window.__ModuleLoader__.load({
               return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] pingAll failed', e);
+              return null;
+            }
+          },
+          // S1：用真实请求验证某一条（index=-1 为 P1 槽）。返回 {ok, route, receipt}，
+          // 其中 ok 只表示"验证跑完了"，路由好坏看 receipt.ok。
+          async probeReal(index) {
+            try {
+              const r = await rpcFace?.probeReal?.(index);
+              return unwrapEnvelope(r);
+            } catch (e) {
+              console.warn('[fallback-queue] probeReal failed', e);
               return null;
             }
           },

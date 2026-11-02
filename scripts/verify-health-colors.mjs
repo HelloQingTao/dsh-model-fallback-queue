@@ -137,22 +137,29 @@ mustMatch('快照下发 lastRequest', index, /lastRequest: runtime\.lastRequest/
 mustMatch('agent/request 记录真实请求', index, /noteRequest\(idx, route\.provider, route\.model, sessionId\)/);
 mustMatch('真实请求失败改判 lastRequest', index, /state: 'fail',/);
 mustMatch('真实请求成功改判 lastRequest', index, /lr\.state === 'sent'/);
-mustMatch('探测体只用最小字段', index, /messages: \[\{ role: 'user', content: 'ping' \}\]/);
+// 探测体只带最小合法字段；两个模式共用同一个请求构造（real 只是换了一条普通问话）
+mustMatch('探测体只用最小字段', index, /messages: \[\{\s*role: 'user',\s*content: mode === 'real'/s);
 mustMatch('探测被拒不冒充风险', index, /PROBE_UNSUPPORTED/);
 mustMatch('默认探测跳过付费条目', index, /pingSkipPaid: true/);
+// 探测体大小可配（1 是会被网关拒绝的历史默认，默认值必须是更安全的值）
+mustMatch('探测 maxTokens 可配置', index, /pingMaxTokens: s\.number\(\)/);
+mustMatch('探测 maxTokens 默认 8', index, /pingMaxTokens: 8,/);
 
 // ---------- 熔断语义：探测成功不等于路由恢复 ----------
-// 探测是 1-token 的异形请求：厂商可能不计费、不校验余额。让它去改熔断账本，
+// 探测是刻意精简的异形请求：厂商可能不计费、不校验余额。让它去改熔断账本，
 // 会把已熔断的路由一次 ping 洗回 closed（冷却期失效 + 失败计数被清零 +
 // 熔断原因被抹掉），熔断阈值因此永远触发不了。
-// 规则：只有真实请求能决定熔断与恢复；探测成功最多把「半开」推进回闭合。
+// 规则：只有真实请求能决定熔断与恢复；
+//   - mode='ping'（微型探测）→ recordProbeSuccess：最多把「半开」推进回闭合；
+//   - mode='real'（真实形状的请求）→ recordSuccess：它就是真实请求级别的证据。
 mustMatch('探测成功走 recordProbeSuccess', index, /router\.recordProbeSuccess\(route\)/);
 mustMatch('recordProbeSuccess 只复位半开', index, /if \(c\.state === CIRCUIT\.HALF_OPEN\)/);
+mustMatch('真实形状的验证请求允许复位熔断', index, /if \(mode === 'real'\) router\.recordSuccess\(route\)/);
 {
-  // probeOne 内部不允许再直接调 recordSuccess
-  const probeStart = index.indexOf('async function probeOne(');
-  const probeBlock = index.slice(probeStart, probeStart + 4000);
-  mustNotMatch('探测成功不再直接 recordSuccess', probeBlock, /router\.recordSuccess\(route\)/);
+  // 探测路径内部不允许出现「无条件的」recordSuccess（只能挂在 mode==='real' 分支上）
+  const probeStart = index.indexOf('async function runProbe(');
+  const probeBlock = index.slice(probeStart, probeStart + 6000);
+  mustNotMatch('探测路径没有无条件的 recordSuccess', probeBlock, /^\s*router\.recordSuccess\(route\);/m);
 }
 
 // ---------- 3b. 三个"静默失效"的硬约束（字符串断言曾全部漏掉） ----------
@@ -163,18 +170,20 @@ mustNotMatch('apply 不得把服务写成第二参', index, /export function app
 mustMatch('llm 必须经 ctx 取服务', index, /const llm = ctx\.get \? ctx\.get\('llm'\) : ctx\.llm/);
 mustMatch('router 暴露 circuitOf 给探测半区', index, /^\s{4}circuitOf,\s*$/m);
 // probeOne 里不得再出现裸 circuitOf（那是 ReferenceError 的原始形态）
+// 注：探测实现已抽成 runProbe(route, opts)——probeOne 只是取 .ok 的薄包装，
+// 断言必须钉在真正干活的 runProbe 上，否则测的是一具空壳。
 {
-  const probeStart = index.indexOf('async function probeOne(');
-  const probeEnd = index.indexOf('async function probeRoute(', probeStart);
+  const probeStart = index.indexOf('async function runProbe(');
+  const probeEnd = index.indexOf('async function probeOne(', probeStart);
   const probeBody = index.slice(probeStart, probeEnd);
-  check('probeOne 不裸调 circuitOf（跨作用域）', !/(?<!router\.)\bcircuitOf\(/.test(probeBody));
+  check('runProbe 不裸调 circuitOf（跨作用域）', !/(?<!router\.)\bcircuitOf\(/.test(probeBody));
   // 两处记账入口（stampProbe / stampFailure）都必须经 router
-  check('probeOne 记账经 router.circuitOf', (probeBody.match(/router\.circuitOf\(/g) || []).length >= 2);
+  check('runProbe 记账经 router.circuitOf', (probeBody.match(/router\.circuitOf\(/g) || []).length >= 2);
 }
 // 探测成功判定必须逐 chunk 判 finish.reason.kind，不能"拿到第一帧就通过"
 {
-  const probeStart = index.indexOf('async function probeOne(');
-  const probeEnd = index.indexOf('async function probeRoute(', probeStart);
+  const probeStart = index.indexOf('async function runProbe(');
+  const probeEnd = index.indexOf('async function probeOne(', probeStart);
   const probeBody = index.slice(probeStart, probeEnd);
   check('探测判定读 finish.reason.kind', /chunk\.reason\?\.kind/.test(probeBody));
   check('探测把 error/aborted 判为失败', /'error'\s*\|\|\s*kind === 'aborted'|kind === 'error'/.test(probeBody));
@@ -182,6 +191,8 @@ mustMatch('router 暴露 circuitOf 给探测半区', index, /^\s{4}circuitOf,\s*
   check('探测超时改用 AbortSignal', /AbortController/.test(probeBody) && /controller\.abort\(\)/.test(probeBody));
   check('探测定时器必须清理', /finally\s*\{[\s\S]*clearTimeout\(timer\)/.test(probeBody));
   check('探测把 signal 传给宿主', /signal: controller\.signal/.test(probeBody));
+  // 回执必须有 code/耗时——"说不清到底怎么了"正是这轮要修的病根
+  check('runProbe 返回回执而非裸布尔', /return \{\s*ok: (true|false), mode/.test(probeBody));
 }
 // 回切策略三态必须真的被区分：probe 要读防抖，manual 不得自动回切
 mustMatch('probe 模式读取 failbackDelayMs 防抖', index, /config\.failbackDelayMs/);
@@ -196,6 +207,9 @@ const keys = [
   'healthOk', 'healthSlow', 'healthProbeFailed', 'healthUnprobed', 'healthUnprobedHint',
   'healthSkipPaidHint', 'healthStale', 'healthAgo', 'healthProbeMs', 'healthVerifying',
   'healthRecoverIn', 'healthUnknown', 'healthProbeUnsupported',
+  // 探测失败的归因文案：缺一个键，面板上就退回那句没信息量的「探测失败」
+  'healthQuota', 'healthFreeQuota', 'healthRateLimited', 'healthUnreachable',
+  'healthProbeTimeout', 'healthAuthFail',
   'reqSent', 'reqOk', 'reqFail', 'reqNone', 'pendingConfirm',
 ];
 const zhStart = client.indexOf('      zh: {');
@@ -293,6 +307,27 @@ check('探测被拒显示为未测（灰）',
   healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: null, probeError: { code: 'PROBE_UNSUPPORTED' } }, snap, now).tone === 'muted');
 check('探测被拒的解释说明不影响可用性',
   healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: null, probeError: { code: 'PROBE_UNSUPPORTED' } }, snap, now).detail === 'healthProbeUnsupportedHint');
+
+// ---------- 8. 探测失败必须说清「为什么失败」 ----------
+// 用户原话："无论是手动探测全部还是自动，都显示有问题，到底是显示有问题还是没探测"。
+// 根因是归因缺失：额度用尽（等到点自己恢复）、免费池超额、网关连不上、密钥失效
+// 在面板上完全是同一个词，用户只能猜成"模型被删了"。下面把归因矩阵钉死。
+const probeFailed = (err) => healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: false, probeError: err }, snap, now);
+const quotaCase = probeFailed({ code: 'QUOTA_EXCEEDED', message: 'X：模型 gfmodel 的可用账号均在限流中，最近一个将于 2026/10/30 00:00:00 解锁。' });
+check('额度用尽 → 主标签直接写原因', quotaCase.text === 'healthQuota', quotaCase.text);
+check('额度用尽 → 右耳给解锁倒计时', /healthRecoverIn/.test(quotaCase.short), quotaCase.short);
+check('额度用尽 → 悬浮提示保留上游原话', quotaCase.detail.includes('解锁'), quotaCase.detail);
+const freeCase = probeFailed({ code: 'THROTTLED', message: 'Free usage limit reached. Free models work in OpenCode' });
+check('免费池超额 → 单独文案', freeCase.text === 'healthFreeQuota', freeCase.text);
+const netCase = probeFailed({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:1234' });
+check('网关连不上 → 单独文案', netCase.text === 'healthUnreachable', netCase.text);
+const authCase = probeFailed({ code: 'AUTH', message: 'invalid api key' });
+check('钥匙失效 → 单独文案', authCase.text === 'healthAuthFail', authCase.text);
+const unknownCase = probeFailed({ code: 'WEIRD', message: 'boom' });
+check('无法归因时退回「探测失败」', unknownCase.text === 'healthProbeFailed', unknownCase.text);
+check('没有解锁时刻时不编倒计时', !/healthRecoverIn/.test(unknownCase.short), unknownCase.short);
+check('宿主下发 probeResetAt', /probeResetAt: c\.probeResetAt/.test(index));
+check('探测成功清掉解锁时刻', /c\.probeResetAt = 0;/.test(index));
 
 if (failures.length) {
   console.error(`✗ ${failures.length} 项失败 / ${pass + failures.length} 项`);

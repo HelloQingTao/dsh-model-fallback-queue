@@ -29,8 +29,10 @@
 - **大保底置顶（pinned）**：给某个模型打上📌「大保底」标记，无论怎么排序它都恒在队尾（最后兜底），P1 槽不受影响。
 - **免费/付费标记**：入口行手动标记免费或付费，芯片与设置页同步显示（中性文字标签，不占用颜色）；仅作标注辅助，不参与排序、不自动判定。
 - **切换是否生效，面板直接回答**：切换本身只决定「下一个请求用哪条」，不产生任何可用性结论。面板顶部那一行写的是**上一轮真实请求**走了哪条、成没成（`上一轮：P3 · 成功 · 12s前` / `上一轮：P3 · 失败 · QUOTA`）；还没发过消息就写「还没发过消息」，刚切换就写「已切到 P3，下一条消息会用它」。没有探测伪造的「验证通过」，也没有自相矛盾的「P1 验证失败」。
-- **健康色与前瞻**：颜色只表示健康——绿＝刚确认可用、黄＝风险（探测失败或偏慢）、红＝熔断、灰＝未测；行内只放状态词加一个很短的「12s前」，完整证据（延迟、失败码、原因）在悬浮提示里，不占面板空间。周期探测**默认关闭**，需在设置页显式开启（开启后默认每 60 秒一轮、默认**跳过付费模型**，探测是 `maxTokens=1` 的微型请求）；**探测失败只记证据、不会把路由自己熔断**，探测请求被厂商拒绝时标「探测被拒」而不是「不可用」。
+- **健康色与前瞻**：颜色只表示健康——绿＝刚确认可用、黄＝风险（探测失败或偏慢）、红＝熔断、灰＝未测；行内只放状态词加一个很短的「12s前」，完整证据（延迟、失败码、原因）在悬浮提示里，不占面板空间。周期探测**默认关闭**，需在设置页显式开启（开启后默认每 60 秒一轮、默认**跳过付费模型**）；**探测失败只记证据、不会把路由自己熔断**，探测请求被厂商拒绝时标「探测被拒」而不是「不可用」。
 - **快速探测（ping）**：一键探测队列里所有模型可用性；周期健康探测默认关闭，可在设置里填间隔（毫秒，0＝关闭）开启，也可选择是否跳过付费模型省配额。
+- **探测体可配 + 用真实请求验证**：探测请求的 `maxTokens` 可调（默认 8；1 会被一部分网关按 400 拒绝，于是「能正常对话的模型」长期显示探测失败）；每条队列行还有一个「验证」按钮，直接发一条**和真实对话同形**的请求，回执给出成败、错误码、耗时与 token 用量——探测体再调也是刻意精简的请求，只有真实形状的请求才算证据。
+- **失败原因说人话**：探测失败不再一律写「探测失败」，而是按上游原文归类成「额度用尽 / 免费额度用尽 / 被限流 / 连不上 / 探测超时 / 鉴权失败」，完整原文进悬浮提示；上游给了明确解锁时刻时，面板直接显示倒计时。
 - **面板直接点选切换**：点芯片面板里的任意一行，立即把生效路由切到该模型（不用等它故障）；P1 行在已生效时点击会打开宿主的模型选择器——P1 的身份就是当前会话模型，只有宿主能改。
 
 ### 效果图
@@ -115,7 +117,7 @@ dsh plugin --profile web add dsh-model-fallback-queue
 
 **③ 免费/付费标记（F3）**：行内按钮在「未标注 → 免费 → 付费 → 未标注」间轮转；标签为中性文字（不占用颜色通道——颜色专供健康状态），未标注不显示。芯片面板同步显示。该标注只做展示辅助，**不参与排序、不做自动判定**（没有可靠的免费/付费数据源，不猜）。
 
-**④ 快速探测 ping（F4）**：设置页排队按钮旁的「探测全部」一键并发（串行请求）探测队列里所有模型可用性，结束后提示「可用 N / 不可用 M」；芯片面板也有同款按钮。设置页下方可配**周期健康探测**：`周期探测间隔`（毫秒，0＝关闭，**默认 0＝不开启**；填 60000 即每 60 秒一轮）＋ `周期探测跳过付费模型`（**默认开**，省配额；关掉则连付费模型一起探）。⚠ 周期探测会向模型发真实请求，可能消耗配额/费用，所以默认不自动开启——升级后你的存量设置**保持原样**（不会被自动改成开启）。
+**④ 快速探测 ping（F4）**：设置页排队按钮旁的「探测全部」一键并发（串行请求）探测队列里所有模型可用性，结束后提示「可用 N / 不可用 M」；芯片面板也有同款按钮。设置页下方可配**周期健康探测**：`周期探测间隔`（毫秒，0＝关闭，**默认 0＝不开启**；填 60000 即每 60 秒一轮）＋ `周期探测跳过付费模型`（**默认开**，省配额；关掉则连付费模型一起探）＋ `探测请求 maxTokens`（**默认 8**，可改 1–512；过小的值会被一部分网关按 400 拒绝）。每条队列行还有一个「验证」按钮：用一条**和真实对话同形**的请求验证这条路由，回执给出成败、错误码、耗时与 token 用量（只手动触发，不进周期扫描）。⚠ 周期探测与真实请求验证都会向模型发真实请求，可能消耗配额/费用，所以周期探测默认不自动开启——升级后你的存量设置**保持原样**（不会被自动改成开启）。
 
 ### 许可证
 
@@ -139,8 +141,10 @@ When your current model hits its quota, gets rate-limited or becomes unavailable
 - **Batch vendor-based adding.** The model picker groups by vendor; check a box per vendor, tick several, and add them all at once (appended vendor-by-vendor then in-group display order; entries already in the queue are greyed out and never re-added).
 - **Pin as last resort (📌).** Mark any row as a “safety net” and it always stays at the tail of the failover order, no matter how you reorder the rest; the P1 slot is unaffected. Multiple pins keep their relative order; pinning everything just falls back to the natural order.
 - **Free/paid marks.** Toggle each entry 未标注 → free → paid. Shown in both the settings rows and the chip panel as neutral text tags (colour is reserved for health); purely a visual aid — never used for sorting or guessed automatically.
-- **Health colour + foresight.** Colour means health only: green = just confirmed working, amber = risk/pending, red = tripped, grey = unverified. Rows carry evidence such as “probe 820ms · 12s ago”. Periodic probing is **off by default** — enable it in settings (once a minute is a typical choice; paid models are skipped by default, each probe is a ~1-token request).
+- **Health colour + foresight.** Colour means health only: green = just confirmed working, amber = risk/pending, red = tripped, grey = unverified. Rows carry evidence such as “probe 820ms · 12s ago”. Periodic probing is **off by default** — enable it in settings (once a minute is a typical choice; paid models are skipped by default).
 - **Fast ping probe.** One click probes every queue model for availability (serial, ~1 token each); periodic health probing is off by default (set a non-zero interval in settings to enable it; paid models are skipped unless you turn that off).
+- **Configurable probe body + verify with a real request.** The probe request’s `maxTokens` is adjustable (default 8; a value of 1 gets rejected with 400 by some gateways, which made perfectly chatty models look permanently broken). Every queue row also has a **Verify** button that sends one request shaped exactly like a real conversation and reports success/failure, error code, latency and token usage — a probe is always a trimmed-down request, only a real-shaped request counts as evidence.
+- **Failures in plain words.** A failed probe no longer just says “probe failed”: it is classified from the upstream text into “quota used up / free quota used up / rate limited / unreachable / probe timeout / auth failed”, with the raw text in the tooltip; when the upstream states an unlock time, the row shows a countdown.
 - **Click-to-switch in the panel.** Click any row in the chip panel to route the active traffic to that model immediately — no failure required. Clicking the P1 row while it is active opens the host's model picker, because P1 *is* the current session model and only the host can change it.
 
 ### Screenshots
@@ -225,7 +229,7 @@ That file is plugin-private data and is **outside the Settings UI's config expor
 
 **③ Free/paid marks (F3).** The row button cycles 未标注 → free → paid → 未标注; tags are neutral text (colour is reserved for health), unknown shows none. The chip panel mirrors the tags. Purely a display aid — never used for ordering or auto-detected (there is no reliable source, so it never guesses).
 
-**④ Fast ping probe (F4).** The “Probe all” button (in the settings page next to the queue, and in the chip panel) pings every queue model serially and reports “N ok / M unavailable”. Below the queue, periodic health probing is configured via **probe interval (ms, 0 = off, default 0 = disabled; enter 60000 for once a minute)** and **skip paid models in periodic probes** (default on, saves quota; turn it off to probe paid models too). ⚠ Periodic probing sends real requests to models and can consume quota/cost, so it stays off until you enable it — existing settings are left untouched on upgrade.
+**④ Fast ping probe (F4).** The “Probe all” button (in the settings page next to the queue, and in the chip panel) pings every queue model serially and reports “N ok / M unavailable”. Below the queue, periodic health probing is configured via **probe interval (ms, 0 = off, default 0 = disabled; enter 60000 for once a minute)**, **skip paid models in periodic probes** (default on, saves quota; turn it off to probe paid models too) and **probe request maxTokens** (default 8, editable 1–512; too small a value gets rejected with 400 by some gateways). Every queue row also has a **Verify** button that checks the route with one request shaped like a real conversation and reports success/failure, error code, latency and token usage (manual only — never part of the periodic scan). ⚠ Both periodic probing and real-request verification send real requests to models and can consume quota/cost, so periodic probing stays off until you enable it — existing settings are left untouched on upgrade.
 
 ### License
 

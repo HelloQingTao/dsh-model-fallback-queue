@@ -47,10 +47,20 @@ const BEHAVIOURS = {
   empty: { kind: 'empty' },
   rej400: { kind: 'error', code: 'INVALID_REQUEST', message: 'unsupported parameter', status: 400 },
   slow: { kind: 'error', code: 'TIMEOUT', message: 'upstream timeout' },
+  // 复现用户真机那条：网关嫌 max_tokens 太小直接 400，于是一条能正常对话的模型
+  // 在面板上长期"探测失败"。这条假上游就是那个网关的替身。
+  tiny: { kind: 'min-tokens', min: 8 },
 };
-function makeStream({ provider, model, signal }, calls) {
+function makeStream({ provider, model, maxTokens, messages, signal }, calls, reqs) {
   if (calls) calls.push(`${provider}/${model}`);
-  const b = BEHAVIOURS[model] || { kind: 'content' };
+  // 完整请求留档：maxTokens / messages 这类"探测体形状"只能靠它验
+  if (reqs) reqs.push({ provider, model, maxTokens, messages });
+  let b = BEHAVIOURS[model] || { kind: 'content' };
+  if (b.kind === 'min-tokens') {
+    b = (Number(maxTokens) || 0) < b.min
+      ? { kind: 'error', code: 'INVALID_REQUEST', message: `max_tokens must be >= ${b.min}`, status: 400 }
+      : { kind: 'content' };
+  }
   const ac = new AbortController();
   if (signal) signal.addEventListener('abort', () => ac.abort(), { once: true });
   const chunks = [];
@@ -79,9 +89,11 @@ function makeStream({ provider, model, signal }, calls) {
  */
 function makeLlm() {
   const calls = [];
+  const reqs = [];
   return {
     calls,
-    stream: (req) => makeStream(req, calls),
+    reqs,
+    stream: (req) => makeStream(req, calls, reqs),
     listProviders: () => [{ id: 'prov' }],
   };
 }
@@ -227,6 +239,79 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
   }
 }
 
+// ================= 场景 S：探测体的大小 + 「用真实请求验证」 =================
+// 用户真机现象：P5（本地 780k 模型）确定能用，但每次探测都显示"不可用"。
+// 根因候选之一就是探测体形状——maxTokens=1 被网关 400 拒绝，于是"探测失败"
+// 冒充了"模型不可用"。这一组把两条路都钉住：
+//   S1 默认探测体是 8（不是 1），同一条"挑剔网关"上的模型能被判活
+//   S2 探测体被拒时记成「探测不支持」（灰），既不刷绿也不冒充黄色风险
+//   S3 real 模式发普通问话、maxTokens=32，且不被"形状被拒"豁免
+{
+  // —— S1：默认 8 → 挑剔网关放行 ——
+  const llmA = makeLlm();
+  const { ctx: ctxA } = makeCtx({ enabled: true, pingIntervalMs: 0, pingSkipPaid: false }, llmA);
+  mod.apply(ctxA, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svcA = ctxA.__service;
+  await svcA.setQueue([{ provider: 'p', model: 'tiny' }]);
+  llmA.calls.length = 0;
+  llmA.reqs.length = 0;
+  const pingA = await svcA.pingAll();
+  ok('默认探测体 maxTokens=8（不是历史默认的 1）', llmA.reqs[0]?.maxTokens === 8,
+    `maxTokens=${llmA.reqs[0]?.maxTokens}`);
+  ok('挑剔网关（要求 max_tokens>=8）下的模型能被判活', pingA?.results?.[0]?.ok === true,
+    JSON.stringify(pingA?.results?.[0]));
+
+  // —— S2：把探测体改回 1 → 被 400 拒 → 「探测不支持」，不是黄色风险 ——
+  const llmB = makeLlm();
+  const { ctx: ctxB } = makeCtx({ enabled: true, pingIntervalMs: 0, pingSkipPaid: false, pingMaxTokens: 1 }, llmB);
+  mod.apply(ctxB, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svcB = ctxB.__service;
+  await svcB.setQueue([{ provider: 'p', model: 'tiny' }]);
+  llmB.reqs.length = 0;
+  const pingB = await svcB.pingAll();
+  ok('显式把探测体设成 1 时确实按 1 发（配置生效）', llmB.reqs[0]?.maxTokens === 1,
+    `maxTokens=${llmB.reqs[0]?.maxTokens}`);
+  const entryB = (await svcB.snapshot())?.entries?.[0];
+  ok('探测体被 400 拒 → 记「探测不支持」而不是真实故障',
+    entryB?.probeError?.code === 'PROBE_UNSUPPORTED', `code=${entryB?.probeError?.code}`);
+  ok('探测体被拒时 probeOk=null（UI 走灰色「未测」，不冒充黄色风险）',
+    entryB?.probeOk === null, `probeOk=${JSON.stringify(entryB?.probeOk)}`);
+  ok('探测体被拒仍如实返回 ok:false', pingB?.results?.[0]?.ok === false);
+
+  // —— S3：用真实请求验证（real 模式）——
+  const llmC = makeLlm();
+  const { ctx: ctxC } = makeCtx({ enabled: true, pingIntervalMs: 0, pingSkipPaid: false }, llmC);
+  mod.apply(ctxC, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svcC = ctxC.__service;
+  await svcC.setQueue([
+    { provider: 'p', model: 'good' },
+    { provider: 'p', model: 'rej400' },
+  ]);
+  llmC.reqs.length = 0;
+
+  const realOk = await svcC.probeReal(0);
+  ok('probeReal 走真实请求并拿到回执', realOk?.ok === true && realOk?.receipt?.ok === true,
+    JSON.stringify(realOk?.receipt));
+  ok('real 模式 maxTokens=32（不是微型探测体）', llmC.reqs.at(-1)?.maxTokens === 32,
+    `maxTokens=${llmC.reqs.at(-1)?.maxTokens}`);
+  ok('real 模式发的是一句普通问话',
+    /OK/.test(String(llmC.reqs.at(-1)?.messages?.[0]?.content || '')),
+    String(llmC.reqs.at(-1)?.messages?.[0]?.content || '').slice(0, 40));
+  ok('real 模式回执带耗时', Number(realOk?.receipt?.latencyMs) >= 0, `latencyMs=${realOk?.receipt?.latencyMs}`);
+
+  const realBad = await svcC.probeReal(1);
+  ok('real 模式不会被"形状被拒"豁免（真实 400 就是 400）',
+    realBad?.receipt?.rejected === false && realBad?.receipt?.code === 'INVALID_REQUEST',
+    JSON.stringify(realBad?.receipt));
+  const entryC = (await svcC.snapshot())?.entries?.[1];
+  ok('real 失败记成真实故障码（不是 PROBE_UNSUPPORTED）',
+    entryC?.probeError?.code === 'INVALID_REQUEST' && entryC?.probeOk === false,
+    `code=${entryC?.probeError?.code} probeOk=${JSON.stringify(entryC?.probeOk)}`);
+}
+
 // ================= 场景 F：推理档位 —— 覆盖路由必须剥掉，能力不匹配不算路由死亡 =======
 // 复现真实报错：会话模型（支持 balanced）→ 插件覆盖到 qodercn/qfmodel（不支持）→
 // 宿主 resolveCallWithInfo 本地抛 UNSUPPORTED_REASONING_EFFORT，请求一条都没发出去。
@@ -356,7 +441,7 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
 }
 
 // ================= 场景 I：熔断语义 —— 探测成功不等于路由恢复 =================
-// 探测是一条 maxTokens=1 的异形请求：厂商可能不计费、不校验余额。它成功不代表
+// 探测是一条刻意精简的异形请求：厂商可能不计费、不校验余额。它成功不代表
 // 真实请求能成。让探测去改熔断账本，后果是：
 //   ① 已熔断（open）的路由被一次 ping 洗回 closed → 冷却期形同虚设；
 //   ② failures 被清零 → 连续失败永远攒不到阈值 → 熔断永远不触发（插件核心功能失效）；
@@ -399,6 +484,51 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
     ok('闭合态探测成功不重置失败计数', c.failures === 1, `failures=${c.failures}`);
     ok('闭合态探测成功不改真实请求的失败原因', c.lastCode === 'TIMEOUT', `lastCode=${c.lastCode}`);
   }
+}
+
+// ================= 崩溃防护：异常不许逃到宿主 =================
+// 背景：插件里凡"没人接的 promise / 同步监听器直接抛"都是**整个宿主进程退出**
+// 级别的故障（Node 24 默认 --unhandled-rejections=throw）。代码看起来完全正常，
+// 只在于某次数据异常时才炸——所以必须真的把它喂进去，看会不会穿出来。
+{
+  const xllm = makeLlm();
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0 }, xllm);
+  mod.apply(ctx, { enabled: true });
+  await new Promise((r) => setTimeout(r, 120));
+
+  // ① session/event：payload 的 data 取景抛出（模拟宿主给了畸形事件）
+  let escaped = null;
+  const evilEvent = { type: 'model/selection' };
+  Object.defineProperty(evilEvent, 'data', {
+    get() { throw new Error('boom-data'); },
+  });
+  try {
+    hooks['session/event']?.({ id: 'sess-evil' }, evilEvent);
+  } catch (e) {
+    escaped = e;
+  }
+  ok('session/event 监听器异常不穿透到宿主', escaped === null, escaped?.message || '');
+
+  // ② session/disposed：session.id 取值抛出
+  let escaped2 = null;
+  const evilSession = {};
+  Object.defineProperty(evilSession, 'id', {
+    get() { throw new Error('boom-id'); },
+  });
+  try {
+    hooks['session/disposed']?.(evilSession);
+  } catch (e) {
+    escaped2 = e;
+  }
+  ok('session/disposed 监听器异常不穿透到宿主', escaped2 === null, escaped2?.message || '');
+
+  // ③ 源码守卫：后台探测不得再把 promise 丢掉；probeTimer 必须 unref
+  const src = await import('node:fs').then((m) => m.readFileSync(join(root, 'index.js'), 'utf8'));
+  ok('index.js 不再有 `void probeRoute(`（会把 rejection 丢成未捕获）', !/void\s+probeRoute\s*\(/.test(src));
+  ok('index.js 不再有裸 `void probeAllRoutes(`', !/void\s+probeAllRoutes\s*\(/.test(src));
+  ok('probeTimer 已 unref（不拖住进程退出）', /probeTimer\.unref/.test(src));
+  ok('预检两个调用点走 preflightSafe（含 .catch 收口）',
+    (src.match(/preflightSafe\(/g) || []).length >= 3);
 }
 
 const failed = results.filter((r) => !r.pass);
