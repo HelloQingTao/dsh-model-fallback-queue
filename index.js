@@ -51,12 +51,18 @@ const DEFAULT_CONFIG = {
   // 周期全员 ping 间隔（ms）；0 = 关闭。
   // 默认 60s 打开：没有周期探测时，UI 里的"健康"只能反映上一次真实请求的结果，
   // 而空闲路由可能早就死了（key 失效/模型下架）却一直显示正常——没有前瞻性。
-  // 探测发的是 maxTokens=1 的微型请求，且默认跳过付费条目（pingSkipPaid），成本可控。
+  // 探测发的是微型请求（maxTokens 见 pingMaxTokens），成本可控。
   pingIntervalMs: 60_000,
   // 周期扫描是否跳过付费条目。默认 false：后备队列常常整条都是付费模型，
   // 跳过付费 = 一行有颜色的状态都看不到（全是「未测」），「提前检测」就成了一句空话。
-  // 探测是 maxTokens=1 的微型请求，成本可忽略；真不想花配额可在设置页关掉。
+  // 探测是微型请求，成本可忽略；真不想花配额可在设置页关掉。
   pingSkipPaid: false,
+  // 探测请求的 maxTokens。历史默认 1（"省到极致"），但这不是更省，而是更容易测不成：
+  // 一部分网关/推理模型会对 1-token 请求直接 400（"max_tokens must be >= N"、
+  // "reasoning budget exceeds max_tokens"），于是一条**完全能正常对话**的模型在面板上
+  // 长期挂着"探测不支持/探测失败"——探测体的形状问题冒充满模型的问题。
+  // 默认 8：多花 7 个 token（约 ¥0.00001/次），换探测真正能成立。
+  pingMaxTokens: 8,
   // 一次性迁移：旧默认 true（跳过付费）会让全付费队列永远停在「未验证」，
   // 升级时翻一次；用户之后自己改回去就永久尊重。
   pingSkipPaidMigrated: false,
@@ -882,6 +888,8 @@ function createRouter(config, log) {
         // 超了就降级成灰色（未验证），不再冒充绿色可用。
         pingIntervalMs: Number(config.pingIntervalMs) || 0,
         pingSkipPaid: config.pingSkipPaid !== false,
+        // 设置页要显示/编辑探测体大小：默认 8，最小 1（1 是历史默认，部分网关会拒）
+        pingMaxTokens: Math.max(1, Math.floor(Number(config.pingMaxTokens) || DEFAULT_CONFIG.pingMaxTokens)),
         entries: queue.map((r, i) => ({
           index: i,
           provider: r.provider,
@@ -1028,8 +1036,26 @@ class FallbackQueueService extends TypertRemoteService {
       return { ok: false, reason: 'error', error: e?.message };
     }
   }
+
+  /**
+   * 「用真实请求验证」一条路由：发一条和真实对话同形的普通请求（不是微型探测体），
+   * 回执里带成败、错误码、耗时和 token 用量。
+   * index: -1 = P1 槽（p1Follow 下即当前会话模型），>=0 = 队列下标。
+   *
+   * 返回值里的 `ok` 只表示"验证跑完了"，路由到底行不行看 `receipt.ok`——
+   * 两者不能混：一个是 RPC 是否成功，一个是上游是否回话。
+   * @returns {Promise<{ok: boolean, route?: {provider:string, model:string}, receipt?: object, reason?: string}>}
+   */
+  async probeReal(index) {
+    if (!serviceBridge?.probeRealRoute) return { ok: false, reason: 'unavailable' };
+    try {
+      return await serviceBridge.probeRealRoute(index);
+    } catch (e) {
+      return { ok: false, reason: 'error', error: e?.message };
+    }
+  }
 }
-markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue', 'pingAll']);
+markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue', 'pingAll', 'probeReal']);
 
 export const inject = ['settings', 'llm'];
 
@@ -1260,8 +1286,23 @@ export function apply(ctx, pluginConfig = {}) {
   /** 探测**请求**超时（毫秒）：到点 abort 掉挂起的流。
    *  注意与 router 的 PROBE_TIMEOUT_MS（90s，半开状态等真实请求的最长期限）不是一回事。 */
   const PROBE_REQUEST_TIMEOUT_MS = 15_000;
-  async function probeOne(route) {
-    // 单条路由的微型探测，无锁（调用方负责串行化）。返回是否可用，并写进电路。
+  /** 「用真实请求验证」的请求超时：它发的是一条真正常规请求，比 ping 慢是正常的。 */
+  const VERIFY_REQUEST_TIMEOUT_MS = 30_000;
+  /** 「用真实请求验证」的 maxTokens：够模型正常回一句话，又不至于真的长篇大论。 */
+  const VERIFY_MAX_TOKENS = 32;
+  /**
+   * 单条路由探测/验证的实现，无锁（调用方负责串行化）。**返回回执而非布尔**：
+   * 调用方要能拿到 code / 耗时 / token 用量，UI 才说得清"到底怎么了"。
+   *  - mode 'ping'：微型请求（maxTokens = config.pingMaxTokens，默认 8），15s 超时
+   *  - mode 'real'：真实请求（一条普通的短对话，maxTokens = 32），30s 超时
+   * 两者写同一套证据字段，区别只在请求形状与超时——UI 的判定逻辑不用分叉。
+   */
+  async function runProbe(route, opts = {}) {
+    const mode = opts.mode === 'real' ? 'real' : 'ping';
+    const maxTokens = mode === 'real'
+      ? VERIFY_MAX_TOKENS
+      : Math.max(1, Math.min(512, Math.floor(Number(config.pingMaxTokens) || DEFAULT_CONFIG.pingMaxTokens)));
+    const timeoutMs = mode === 'real' ? VERIFY_REQUEST_TIMEOUT_MS : PROBE_REQUEST_TIMEOUT_MS;
     const key = router.keyOf(route);
     const startedAt = Date.now();
     // 探测结果无条件记账（无论成败）：UI 要能说"12 秒前测过、890ms、可用"，
@@ -1298,7 +1339,8 @@ export function apply(ctx, pluginConfig = {}) {
       c.lastProbeAt = Date.now();
       c.probeLatencyMs = Date.now() - startedAt;
     };
-    ctx.logger?.info?.('[fallback-queue] probing route %s/%s', route.provider, route.model);
+    ctx.logger?.info?.('[fallback-queue] %s route %s/%s (maxTokens=%s)',
+      mode === 'real' ? 'verifying' : 'probing', route.provider, route.model, maxTokens);
     // 超时用 AbortSignal 传给宿主：旧实现用 Promise.race + setTimeout，超时后
     // 那个 15s 定时器从不清除、底层 stream 也从不 abort——每探测一条就漏一个
     // 挂起连接和一个定时器，全员 ping 一轮能漏掉整整一队。
@@ -1307,10 +1349,10 @@ export function apply(ctx, pluginConfig = {}) {
     try {
       if (!llm?.stream) {
         ctx.logger?.warn?.('[fallback-queue] probe skipped: llm service unavailable');
-        return false;
+        return { ok: false, reason: 'no-stream' };
       }
       if (controller) {
-        timer = setTimeout(() => controller.abort(), PROBE_REQUEST_TIMEOUT_MS);
+        timer = setTimeout(() => controller.abort(), timeoutMs);
         if (timer.unref) timer.unref();
       }
       const stream = llm.stream({
@@ -1318,8 +1360,12 @@ export function apply(ctx, pluginConfig = {}) {
         model: route.model,
         // 探测体只用最小合法字段：带 name 之类的扩展字段时，一些厂商会直接
         // 400 拒绝，于是「能正常对话的模型」在面板上长期显示探测失败。
-        messages: [{ role: 'user', content: 'ping' }],
-        maxTokens: 1,
+        // mode='real' 时发的是一句普通问话——它的意义正是"和真实请求同形"。
+        messages: [{
+          role: 'user',
+          content: mode === 'real' ? '请只回复 OK 两个字母，不要任何解释。' : 'ping',
+        }],
+        maxTokens,
         ...(controller ? { signal: controller.signal } : {}),
       });
       // ⚠️ 关键语义：llm.stream **从不抛错**——适配层的失败会变成终态 finish chunk
@@ -1328,10 +1374,17 @@ export function apply(ctx, pluginConfig = {}) {
       // 旧实现把它当成"能回话"，于是探测成功、面板刷绿、lastOkAt 被刷新——把死路由
       // 涂成健康，比不探测更危险。必须逐 chunk 判。
       let verdict = null; // null = 还没有结论
+      let usage = null; // 上游回传的 token 用量（有就带上，回执里给 UI 看成本）
+      let sample = ''; // 前若干字符的真实输出：回执里要能说"它到底回了什么"
       for await (const chunk of stream) {
         if (!chunk || typeof chunk !== 'object') continue;
+        if (chunk.type === 'usage') {
+          usage = chunk.usage || usage;
+          continue;
+        }
         if (chunk.type === 'finish') {
           const kind = chunk.reason?.kind;
+          if (chunk.usage) usage = chunk.usage;
           if (kind === 'error' || kind === 'aborted') {
             const failure = chunk.reason?.failure || {};
             verdict = {
@@ -1346,13 +1399,18 @@ export function apply(ctx, pluginConfig = {}) {
           break; // 终态帧到手即收工
         }
         // 任何真实内容帧（文本/推理/tool-call）都足以证明模型能回话，
-        // 不必等 finish——这才是"maxTokens=1 探测"要省的那点 token。
-        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta'
+        // 不必等 finish——这才是"微型探测"要省的那点 token。
+        if (chunk.type === 'text-delta') {
+          if (sample.length < 120) sample += String(chunk.text ?? chunk.delta ?? '');
+          verdict = { ok: true };
+          break;
+        }
+        if (chunk.type === 'reasoning-delta'
           || chunk.type === 'tool-call-delta' || chunk.type === 'block-start' || chunk.type === 'block-end') {
           verdict = { ok: true };
           break;
         }
-        // usage 等无内容帧：继续读，不据此下结论
+        // 其他无内容帧：继续读，不据此下结论
       }
       if (verdict === null) {
         // 流读完了却一个帧都没给：上游空响应，不能算通过
@@ -1360,45 +1418,98 @@ export function apply(ctx, pluginConfig = {}) {
       }
       // 立刻中断探测流省 token（成功时尤其重要：我们只读了一个帧就走）
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
+      const latencyMs = Date.now() - startedAt;
       if (verdict.ok) {
         router.recordSuccess(route);
         stampProbe(true);
-        ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
-        return true;
+        ctx.logger?.info?.('[fallback-queue] %s ok: %s (%sms)', mode, key, latencyMs);
+        return {
+          ok: true, mode, code: null, message: '', latencyMs, maxTokens, usage,
+          sample: sample.trim().slice(0, 80),
+        };
       }
       // 失败路径：只记证据，不动熔断器。
-      // 为什么：探测是一条 maxTokens=1 的异形请求，某些厂商会以 400/429/超时拒绝它。
+      // 为什么：探测是一条刻意精简的异形请求，某些厂商会以 400/429/超时拒绝它。
       // 如果让它累计失败，60s 一次的周期探测会亲手把每条路由"熔断"掉——
       // 监控把自己监控死，用户看到的就是"一片红、切过去也没用"。
       // 真死了的路由由真实请求记账；探测只负责说明"上次探测没成功"。
       const code = verdict.code;
       const msg = String(verdict.message || '');
-      // 探测体被拒（400/参数不合法）说明**这次探测不成立**，不能据此说模型不可用：
+      const statusNum = Number(verdict.status);
+      // 探测体被拒（4xx 客户端拒绝）说明**这次探测不成立**，不能据此说模型不可用：
       // 标成「探测不支持」，UI 按灰色「未测」显示，不冒充黄色风险。
+      // 判定规则：除 鉴权(401/403) / 额度(402) / 模型不存在(404) / 限流(429) 之外的 4xx，
+      // 一律算"形状被拒"——因为探测体是刻意精简的，被拒的往往不是模型而是请求形状。
       // 但鉴权/额度/模型不存在这类报错即使包着 400 也是真问题，不能洗白。
-      const realFault = /api.?key|authenticat|unauthor|forbidden|quota|额度|余额|余额不足|rate.?limit|not found|does not exist|no such model/i.test(msg);
-      const rejected = !realFault && (
-        code === 'INVALID_REQUEST' || code === 'BAD_REQUEST'
-        || code === 'INVALID_ARGS' || code === 'CONTEXT_WINDOW_EXCEEDED'
-        || verdict.status === 400 || verdict.status === 422
-        || /invalid (request|argument|parameter)|unsupported|not supported|max_tokens/i.test(msg)
+      const realFault = /api.?key|authenticat|unauthor|forbidden|quota|额度|余额|rate.?limit|too many requests|not found|does not exist|no such model/i.test(msg);
+      const REJECTED_CODES = new Set([
+        'INVALID_REQUEST', 'BAD_REQUEST', 'INVALID_ARGS', 'INVALID_PARAMETER',
+        'UNSUPPORTED_PARAMETER', 'CONTEXT_WINDOW_EXCEEDED', 'VALIDATION_ERROR',
+      ]);
+      const REJECTED_STATUS = new Set([400, 405, 406, 409, 413, 415, 422, 424]);
+      // 注意 mode='real' 时**不做"形状被拒"豁免**：真实请求被 400 就是真实请求被 400，
+      // 它不是探测体的形状问题，把它洗成「未测」等于替一条真坏的路由遮掩。
+      const rejected = mode === 'ping' && !realFault && (
+        REJECTED_CODES.has(code)
+        || REJECTED_STATUS.has(statusNum)
+        || /invalid (request|argument|parameter)|unsupported|not supported|max_tokens|max_completion_tokens|schema|stream_options/i.test(msg)
       );
-      if (rejected) {
-        stampFailure('PROBE_UNSUPPORTED', '该厂商拒绝了探测请求（不代表模型不可用）', null);
-      } else {
-        stampFailure(code, normalizeReason(msg));
-      }
-      ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s (circuit untouched)', key, code);
-      return false;
+      const finalCode = rejected ? 'PROBE_UNSUPPORTED' : code;
+      const finalMsg = rejected ? '该厂商拒绝了探测请求（不代表模型不可用）' : normalizeReason(msg);
+      // 探测被拒是"没测成"，probeOk 记 null（UI 按灰色未测显示）；
+      // 其余失败都是"测过且没成"，记 false（UI 按黄色风险显示）。
+      stampFailure(finalCode, finalMsg, rejected ? null : false);
+      ctx.logger?.info?.('[fallback-queue] %s failed: %s code=%s rejected=%s (circuit untouched)',
+        mode, key, code, rejected);
+      return {
+        ok: false, mode, code: finalCode, rejected, message: finalMsg,
+        status: verdict.status, latencyMs, maxTokens, usage,
+      };
     } catch (e) {
       // 走到这里的是"真异常"：abort、网络层直接抛、适配器注册缺失等
       const aborted = e?.name === 'AbortError' || controller?.signal?.aborted === true;
       const code = aborted ? 'TIMEOUT' : (typeof e?.code === 'string' && e.code ? e.code : 'UNKNOWN');
       stampFailure(code, normalizeReason(e?.message));
-      ctx.logger?.info?.('[fallback-queue] probe threw: %s code=%s (circuit untouched)', key, code);
-      return false;
+      ctx.logger?.info?.('[fallback-queue] %s threw: %s code=%s (circuit untouched)', mode, key, code);
+      return {
+        ok: false, mode, code, rejected: false, message: normalizeReason(e?.message),
+        latencyMs: Date.now() - startedAt, maxTokens,
+      };
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  }
+  /** 微型探测（全员 ping / 半开扫描用）：只要布尔——调用方只关心"能用吗"。 */
+  async function probeOne(route) {
+    const receipt = await runProbe(route, { mode: 'ping' });
+    return receipt.ok === true;
+  }
+  /**
+   * 「用真实请求验证」：对指定路由发一条**真正常规请求**（不是微型探测体）。
+   * index: -1 = P1 槽（p1Follow 下即当前会话模型），>=0 = 队列下标。
+   *
+   * 为什么需要它：探测体再怎么调，仍然是"一条刻意精简的请求"。当网关按请求形状
+   * 挑剔时，探测失败并不能证明模型不可用——只有发一条和真实对话同形的请求才算证据。
+   * 代价是它真的会花 token，所以**只由用户手动点**，不参与周期扫描。
+   */
+  async function probeRealRoute(index) {
+    if (!llm?.stream) return { ok: false, reason: 'no-stream' };
+    const i = Number.isFinite(Number(index)) ? Number(index) : -1;
+    const target = i === -1
+      ? (config.p1Follow ? router.sessionModelFor(null) : (config.queue?.[0] || null))
+      : (config.queue?.[i] || null);
+    if (!target) return { ok: false, reason: 'no-route' };
+    if (probing || probingAll) return { ok: false, reason: 'busy' };
+    probing = true;
+    try {
+      const receipt = await runProbe(target, { mode: 'real' });
+      return {
+        ok: true, // 注意：这是"验证跑完了"，路由好不好看 receipt.ok
+        route: { provider: target.provider, model: target.model },
+        receipt,
+      };
+    } finally {
+      probing = false;
     }
   }
   // 半开扫描的入口：拿 probing 锁后探一条（一次探一条，串行推进）；
@@ -1775,7 +1886,7 @@ export function apply(ctx, pluginConfig = {}) {
     })().catch((e) => ctx.logger?.warn?.('[fallback-queue] boot load failed: %s', e?.message));
   });
   // ---- 运行态 RPC 服务 ----
-  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes, probeRoute };
+  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes, probeRoute, probeRealRoute };
   ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
   ctx.effect(() => () => {
     serviceBridge = null;
@@ -1806,6 +1917,9 @@ export const Config = s.object({
   failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
   pingIntervalMs: s.number().default(DEFAULT_CONFIG.pingIntervalMs).description('周期全员 ping 间隔毫秒（0=关闭）').volatile(),
   pingSkipPaid: s.boolean().default(DEFAULT_CONFIG.pingSkipPaid).description('周期扫描跳过付费条目（省配额）').volatile(),
+  // 探测请求的 maxTokens。太小会被一部分网关按 400 拒绝（"max_tokens must be >= N"），
+  // 于是「能正常对话的模型」长期显示探测失败——默认 8 是为了让探测请求本身合法。
+  pingMaxTokens: s.number().default(DEFAULT_CONFIG.pingMaxTokens).description('探测请求的 maxTokens（默认 8；过小会被部分网关 400 拒绝）').volatile(),
   pingDefaultsMigrated: s.boolean().default(DEFAULT_CONFIG.pingDefaultsMigrated).description('内部：周期探测默认值已完成一次性升级').volatile(),
   // 必须显式声明：migratePingDefaults() 会把它写进 settings，但 schema 没这个键时
   // 该值虽然能被落盘，却不经过校验/默认值投影——等于一个"匿名"字段。声明后它才是

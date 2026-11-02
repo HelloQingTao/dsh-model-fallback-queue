@@ -160,7 +160,17 @@ window.__ModuleLoader__.load({
         probeSection: '周期健康探测',
         pingInterval: '间隔（毫秒，0=关闭；默认 60000=每 60 秒确认一次）',
         pingSkipPaid: '周期探测跳过付费模型（省配额；默认关闭 = 全都探）',
-        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens=1），可能产生少量调用；默认探测所有模型，想省配额可打开下面的跳过',
+        pingMaxTokens: '探测请求 maxTokens（默认 8；部分网关会拒绝过小的值，改大更保险）',
+        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens 见上，默认 8），可能产生少量调用；默认探测所有模型，想省配额可打开下面的跳过',
+        // 「用真实请求验证」：探测体再调也是刻意精简的请求，网关按形状挑剔时它测不出来；
+        // 这一项直接发一条和真实对话同形的请求，代价是花 token，所以只手动触发。
+        verifyReal: '验证',
+        verifyRealTitle: '用一条真实请求验证这条路由（会消耗少量 token）',
+        verifyRealBusy: '上一条验证还没结束，稍等再点',
+        verifyRealOk: '✓ {pos} 真实请求通过 · {ms}ms{out}',
+        verifyRealOkOut: ' · 输出 {n} token',
+        verifyRealFail: '✕ {pos} 真实请求失败 · {code}',
+        verifyRealRejected: '✕ {pos} 真实请求被拒（{code}）：{msg}',
         queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
         // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
@@ -323,7 +333,15 @@ window.__ModuleLoader__.load({
         probeSection: 'Periodic health probe',
         pingInterval: 'Interval (ms, 0 = off; default 60000 = check every 60s)',
         pingSkipPaid: 'Skip paid models in periodic probes (saves quota; off by default = probe everything)',
-        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens=1) and may consume a little quota; every model is probed by default — enable the skip below to save quota',
+        pingMaxTokens: 'Probe request maxTokens (default 8; some gateways reject very small values)',
+        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens per above, default 8) and may consume a little quota; every model is probed by default — enable the skip below to save quota',
+        verifyReal: 'Verify',
+        verifyRealTitle: 'Verify this route with one real request (costs a few tokens)',
+        verifyRealBusy: 'a previous verification is still running, retry in a moment',
+        verifyRealOk: '✓ {pos} real request ok · {ms}ms{out}',
+        verifyRealOkOut: ' · {n} output tokens',
+        verifyRealFail: '✕ {pos} real request failed · {code}',
+        verifyRealRejected: '✕ {pos} real request rejected ({code}): {msg}',
         queueRowHint: '📌 = last-resort · colour = health (price is text only)',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
@@ -991,6 +1009,9 @@ window.__ModuleLoader__.load({
       // F4 探测全部：进行中 + 结果提示
       const [probing, setProbing] = React.useState(false);
       const [probeNote, setProbeNote] = React.useState(null);
+      // 「用真实请求验证」：正在验证的行索引（null = 空闲）与该行的回执文案
+      const [verifying, setVerifying] = React.useState(null);
+      const [verifyNote, setVerifyNote] = React.useState(null);
       // 相对时间刷新器：设置页不轮询快照，不 tick 的话"12s前"会冻住不更新。
       const [, setClockTick] = React.useState(0);
       React.useEffect(() => {
@@ -999,6 +1020,8 @@ window.__ModuleLoader__.load({
       }, []);
       // 周期探测间隔的本地草稿（null = 跟随服务端值）
       const [pingDraft, setPingDraft] = React.useState(null);
+      // 探测体 maxTokens 的本地草稿（同样的理由：每敲一下就落盘会把输入顶回旧值）
+      const [pingTokensDraft, setPingTokensDraft] = React.useState(null);
 
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
@@ -1038,6 +1061,15 @@ window.__ModuleLoader__.load({
         if (raw === null) return;
         const v = Math.max(0, Math.floor(Number(raw) || 0));
         if (v !== (Number(cfg.pingIntervalMs) || 0)) void patch({ pingIntervalMs: v });
+      };
+
+      // 探测体 maxTokens：1..512 之外的值没有意义（1 是历史默认，部分网关会拒）
+      const commitPingTokens = () => {
+        const raw = pingTokensDraft;
+        setPingTokensDraft(null);
+        if (raw === null) return;
+        const v = Math.max(1, Math.min(512, Math.floor(Number(raw) || 8)));
+        if (v !== (Number(cfg.pingMaxTokens) || 8)) void patch({ pingMaxTokens: v });
       };
 
       // 队列写路径：只落 state 文件，不碰 settings，因此不会触发宿主主题全量重算
@@ -1114,6 +1146,47 @@ window.__ModuleLoader__.load({
         // 而实际上（必修 1 的参数不匹配）每次点击都被网关拒绝了。
         const reason = r?.reason || 'unknown';
         setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
+      };
+
+      /**
+       * 「用真实请求验证」某一条（S1）：发一条和真实对话同形的请求，而不是微型探测体。
+       * 为什么单独一个按钮：探测体再怎么调都是刻意精简的请求，网关按形状挑剔时它测不出
+       * 真相；只有真实请求才算证据。代价是真的花 token，所以只手动点，不进周期扫描。
+       */
+      const verifyRow = async (i) => {
+        if (verifying !== null) {
+          setVerifyNote(t('verifyRealBusy'));
+          return;
+        }
+        const pos = cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`;
+        setVerifying(i);
+        setVerifyNote(null);
+        setErr(null);
+        try {
+          const r = await host.probeReal(i);
+          await refresh(); // 证据字段（lastOkAt/probeOk…）会变，徽章要跟着重画
+          // r.ok 只表示"验证跑完了"，路由行不行看 r.receipt.ok——两者不能混。
+          if (!r?.ok) {
+            const reason = r?.reason || 'unknown';
+            setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
+            return;
+          }
+          const rc = r.receipt || {};
+          if (rc.ok) {
+            const outN = rc.usage?.outputTokens ?? rc.usage?.output_tokens ?? rc.usage?.completion_tokens;
+            const out = Number.isFinite(Number(outN))
+              ? t('verifyRealOkOut', { n: Number(outN) })
+              : '';
+            setVerifyNote(t('verifyRealOk', { pos, ms: rc.latencyMs ?? '?', out }));
+          } else if (rc.rejected) {
+            const msg = String(rc.message || '').slice(0, 120);
+            setVerifyNote(t('verifyRealRejected', { pos, code: rc.code || 'UNKNOWN', msg }));
+          } else {
+            setVerifyNote(t('verifyRealFail', { pos, code: rc.code || 'UNKNOWN' }));
+          }
+        } finally {
+          setVerifying(null);
+        }
       };
 
       const modes = [
@@ -1204,6 +1277,19 @@ window.__ModuleLoader__.load({
                       },
                       t('switchBtn'),
                     ),
+                    // S1：用真实请求验证这一条。探测体是刻意精简的请求，遇到按形状挑剔的
+                    // 网关时"探测失败"不能证明模型不可用；这个按钮发一条真正常规请求。
+                    h(
+                      'button',
+                      {
+                        onClick: () => { void verifyRow(i); },
+                        disabled: verifying !== null,
+                        title: verifying === i ? t('verifyRealBusy') : t('verifyRealTitle'),
+                        'aria-label': t('verifyReal'),
+                        style: verifying !== null ? btnSmallDisabled : btnSmall,
+                      },
+                      verifying === i ? '…' : t('verifyReal'),
+                    ),
                     // F2：大保底 PIN 开关
                     h(
                       'button',
@@ -1285,6 +1371,18 @@ window.__ModuleLoader__.load({
                   ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
                   : probeNote)
             : null,
+          // 「用真实请求验证」的回执：通过/失败的结论必须落在屏幕上，不能只进展。
+          verifyNote
+            ? h('div', {
+                style: {
+                  fontSize: 11,
+                  marginTop: 2,
+                  color: verifyNote.startsWith('✓')
+                    ? 'var(--dsw-alias-state-success-primary, #2f8f4e)'
+                    : 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+                },
+              }, verifyNote)
+            : null,
           // 切换的真实性在面板里看（上一轮真实请求走了哪条），设置页不重复占位。
         ),
         // 回切策略
@@ -1349,6 +1447,22 @@ window.__ModuleLoader__.load({
             h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
               h(Switch, { checked: cfg.pingSkipPaid !== false, onChange: (v) => patch({ pingSkipPaid: v }), label: '' }),
               t('pingSkipPaid'),
+            ),
+            // 探测体大小：太小（尤其是历史默认 1）会被一部分网关直接 400 拒绝，
+            // 于是"能正常对话的模型"长期显示探测失败——这个值就是给那种情况留的旋钮。
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
+              h('input', {
+                type: 'number',
+                min: 1,
+                max: 512,
+                step: 1,
+                value: pingTokensDraft === null ? (Number(cfg.pingMaxTokens) || 8) : pingTokensDraft,
+                onChange: (e) => setPingTokensDraft(e.target.value),
+                onBlur: commitPingTokens,
+                onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
+                style: { width: 90, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
+              }),
+              t('pingMaxTokens'),
             ),
             h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-state-warn-primary, #c98a1b)' } }, t('pingCostWarn')),
           ),
@@ -2241,6 +2355,17 @@ window.__ModuleLoader__.load({
               return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] pingAll failed', e);
+              return null;
+            }
+          },
+          // S1：用真实请求验证某一条（index=-1 为 P1 槽）。返回 {ok, route, receipt}，
+          // 其中 ok 只表示"验证跑完了"，路由好坏看 receipt.ok。
+          async probeReal(index) {
+            try {
+              const r = await rpcFace?.probeReal?.(index);
+              return unwrapEnvelope(r);
+            } catch (e) {
+              console.warn('[fallback-queue] probeReal failed', e);
               return null;
             }
           },

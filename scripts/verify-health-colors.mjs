@@ -131,10 +131,14 @@ mustMatch('快照下发 lastRequest', index, /lastRequest: runtime\.lastRequest/
 mustMatch('agent/request 记录真实请求', index, /noteRequest\(idx, route\.provider, route\.model, sessionId\)/);
 mustMatch('真实请求失败改判 lastRequest', index, /state: 'fail',/);
 mustMatch('真实请求成功改判 lastRequest', index, /lr\.state === 'sent'/);
-mustMatch('探测体只用最小字段', index, /messages: \[\{ role: 'user', content: 'ping' \}\]/);
+// 探测体只带最小合法字段；两个模式共用同一个请求构造（real 只是换了一条普通问话）
+mustMatch('探测体只用最小字段', index, /messages: \[\{\s*role: 'user',\s*content: mode === 'real'/s);
 mustMatch('探测被拒不冒充风险', index, /PROBE_UNSUPPORTED/);
 mustMatch('默认探测不跳过付费', index, /pingSkipPaid: false/);
 mustMatch('跳过付费的旧默认只迁移一次', index, /pingSkipPaidMigrated/);
+// 探测体大小可配（1 是会被网关拒绝的历史默认，默认值必须是更安全的值）
+mustMatch('探测 maxTokens 可配置', index, /pingMaxTokens: s\.number\(\)/);
+mustMatch('探测 maxTokens 默认 8', index, /pingMaxTokens: 8,/);
 
 // ---------- 3b. 三个"静默失效"的硬约束（字符串断言曾全部漏掉） ----------
 // 这些 bug 的共同点：不抛错、不报警，只是功能悄悄不工作。
@@ -144,18 +148,20 @@ mustNotMatch('apply 不得把服务写成第二参', index, /export function app
 mustMatch('llm 必须经 ctx 取服务', index, /const llm = ctx\.get \? ctx\.get\('llm'\) : ctx\.llm/);
 mustMatch('router 暴露 circuitOf 给探测半区', index, /^\s{4}circuitOf,\s*$/m);
 // probeOne 里不得再出现裸 circuitOf（那是 ReferenceError 的原始形态）
+// 注：探测实现已抽成 runProbe(route, opts)——probeOne 只是取 .ok 的薄包装，
+// 断言必须钉在真正干活的 runProbe 上，否则测的是一具空壳。
 {
-  const probeStart = index.indexOf('async function probeOne(');
-  const probeEnd = index.indexOf('async function probeRoute(', probeStart);
+  const probeStart = index.indexOf('async function runProbe(');
+  const probeEnd = index.indexOf('async function probeOne(', probeStart);
   const probeBody = index.slice(probeStart, probeEnd);
-  check('probeOne 不裸调 circuitOf（跨作用域）', !/(?<!router\.)\bcircuitOf\(/.test(probeBody));
+  check('runProbe 不裸调 circuitOf（跨作用域）', !/(?<!router\.)\bcircuitOf\(/.test(probeBody));
   // 两处记账入口（stampProbe / stampFailure）都必须经 router
-  check('probeOne 记账经 router.circuitOf', (probeBody.match(/router\.circuitOf\(/g) || []).length >= 2);
+  check('runProbe 记账经 router.circuitOf', (probeBody.match(/router\.circuitOf\(/g) || []).length >= 2);
 }
 // 探测成功判定必须逐 chunk 判 finish.reason.kind，不能"拿到第一帧就通过"
 {
-  const probeStart = index.indexOf('async function probeOne(');
-  const probeEnd = index.indexOf('async function probeRoute(', probeStart);
+  const probeStart = index.indexOf('async function runProbe(');
+  const probeEnd = index.indexOf('async function probeOne(', probeStart);
   const probeBody = index.slice(probeStart, probeEnd);
   check('探测判定读 finish.reason.kind', /chunk\.reason\?\.kind/.test(probeBody));
   check('探测把 error/aborted 判为失败', /'error'\s*\|\|\s*kind === 'aborted'|kind === 'error'/.test(probeBody));
@@ -163,6 +169,8 @@ mustMatch('router 暴露 circuitOf 给探测半区', index, /^\s{4}circuitOf,\s*
   check('探测超时改用 AbortSignal', /AbortController/.test(probeBody) && /controller\.abort\(\)/.test(probeBody));
   check('探测定时器必须清理', /finally\s*\{[\s\S]*clearTimeout\(timer\)/.test(probeBody));
   check('探测把 signal 传给宿主', /signal: controller\.signal/.test(probeBody));
+  // 回执必须有 code/耗时——"说不清到底怎么了"正是这轮要修的病根
+  check('runProbe 返回回执而非裸布尔', /return \{\s*ok: (true|false), mode/.test(probeBody));
 }
 // 回切策略三态必须真的被区分：probe 要读防抖，manual 不得自动回切
 mustMatch('probe 模式读取 failbackDelayMs 防抖', index, /config\.failbackDelayMs/);
