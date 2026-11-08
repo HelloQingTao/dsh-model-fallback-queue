@@ -612,7 +612,7 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
     inputModalities: ['text'],
   });
   // p1Follow=false：让链只由队列决定，避免会话模型锚点混进来干扰断言。
-  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0, p1Follow: false }, jllm);
+  const { ctx, hooks, doc } = makeCtx({ enabled: true, pingIntervalMs: 0, p1Follow: false }, jllm);
   const plug = mod.apply(ctx, { enabled: true });
   await new Promise((r) => setTimeout(r, 150));
   const svc = ctx.__service;
@@ -827,6 +827,40 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
     ok('会话隔离：B 切回 P1 不清 A 的手动目标',
       snapY.sessionManual['sess-A'] === 1,
       JSON.stringify(snapY.sessionManual));
+
+    // —— 8b) 三种恢复策略：换路链从「本会话锚点」起跑（按会话隔离）——
+    // 场景：P1 失败一次（不熔断，failures=1 < threshold=2）→ 第二条接住成功 → 锚点钉到第二条。
+    // 下一轮应该从第二条起跑，而不是回到第一条重撞。
+    const runWith = async (options) => { jllm.calls.length = 0; await collect(options); return jllm.calls.join(','); };
+
+    // (a) 粘滞（默认）：锚点 P6 可用 → 一直 P6，不再重撞 P1
+    await svc.setQueue([{ provider: 'p', model: 'slow', paid: 'free' }, { provider: 'p', model: 'good', paid: 'free' }]);
+    const s1 = await runWith({ ...ask, sessionId: 'sess-sticky-anchor' });
+    ok('粘滞：首轮 P1 失败→第二条接住', s1 === 'p/slow,p/good', s1);
+    const s2 = await runWith({ ...ask, sessionId: 'sess-sticky-anchor' });
+    ok('粘滞：第二轮直接从锚点起跑，不再重撞 P1', s2 === 'p/good', s2);
+
+    // (b) 探测回切：P1 恢复可用 + 过了防抖 → 本轮先从 P1 试一次
+    doc.value.failbackMode = 'probe';
+    await plug.loadSettings();
+    await svc.setQueue([{ provider: 'q', model: 'slow', paid: 'free' }, { provider: 'q', model: 'good', paid: 'free' }]);
+    const p1 = await runWith({ ...ask, sessionId: 'sess-probe-anchor' });
+    ok('探测回切：首轮建立锚点到第二条', p1 === 'q/slow,q/good', p1);
+    const p2 = await runWith({ ...ask, sessionId: 'sess-probe-anchor' });
+    ok('探测回切：本轮从 P1 重试一次（P1 已恢复、过防抖）', p2.startsWith('q/slow'), p2);
+
+    // (c) 手动回切：永不自动回 P1，锚点继续生效
+    doc.value.failbackMode = 'manual';
+    await plug.loadSettings();
+    await svc.setQueue([{ provider: 'r', model: 'slow', paid: 'free' }, { provider: 'r', model: 'good', paid: 'free' }]);
+    const m1 = await runWith({ ...ask, sessionId: 'sess-manual-anchor' });
+    ok('手动回切：首轮建立锚点到第二条', m1 === 'r/slow,r/good', m1);
+    const m2 = await runWith({ ...ask, sessionId: 'sess-manual-anchor' });
+    ok('手动回切：永不自动回 P1，仍从锚点起跑', m2 === 'r/good', m2);
+
+    // 复原默认策略，避免影响后续场景
+    doc.value.failbackMode = 'sticky';
+    await plug.loadSettings();
 
     // —— 9) P0：网关级 hold 不许被放大；ISO 到期时刻换算成 providerRetryAfterMs ——
     await svc.setQueue([{ provider: 'p', model: 'hold', paid: 'free' }]);

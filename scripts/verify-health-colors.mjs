@@ -195,7 +195,13 @@ mustMatch('客户端切换透传 sessionId', client, /host\.manualFailback\(idx,
 mustMatch('客户端读 per-session 手动目标', client, /snap\.sessionManual\[props\.sessionId\]/);
 mustMatch('客户端读 per-session 最近请求', client, /snap\?\.sessionLastRequest\?\.\[sid\]/);
 mustMatch('buildFallbackChain 从会话手动目标起步', index, /const manual = manualFor\(sessionId\)/);
-mustMatch('agent/request 记录真实请求（方案B：不改 provider/model，仅观测）', index, /noteRequest\(-1, cfg\.provider, cfg\.model, sessionId\)/);
+mustMatch('agent/request 只观测会话模型（方案B：不改 provider/model）', index, /noteSessionModel\(sessionId, cfg\.provider, cfg\.model\)/);
+mustNotMatch('agent/request 不再用提案覆盖 lastRequest（防瞬变 P1）', index, /noteRequest\(-1, cfg\.provider, cfg\.model, sessionId\)/);
+mustNotMatch('agent/request 不再把 inFlight 重置成 -1（防瞬变 P1）', index, /setInFlight\(sessionId, -1\)/);
+mustMatch('markRequest 同步 inFlight 到实际路由', index, /router\.setInFlight\(sessionId, routeIdx\)/);
+mustMatch('换路链从本会话锚点起跑', index, /const cursorPos = router\.cursorFor\(sessionId\)\.activeIndex/);
+mustMatch('成功后把锚点钉到实际作答路由', index, /router\.setCursor\(sessionId, routeIdx\)/);
+mustMatch('探测回切只在 probe 模式按防抖回 P1', index, /config\.failbackMode === 'probe'/);
 mustMatch('方案B：agent/request 不再覆盖路由', index, /return cfg;/);
 mustMatch('方案B：llm/stream 中间件存在', index, /ctx\.on\('llm\/stream'/);
 mustMatch('方案B：子请求标记 internal 防递归', index, /internalStreamOptions\.add\(subOpts\)/);
@@ -445,6 +451,11 @@ check('「当前」优先取真实作答位', /const currentIdx = servedIdx !== 
 check('P1 行也用同一口径判当前', /const p1IsCurrent = servedIdx !== null \? servedIdx === p1Slot : p1Active;/.test(client));
 check('队列行高亮跟真实作答位走', /const isActive = servedIdx !== null \? servedIdx === e\.index : effective === e\.index;/.test(client));
 check('游标与作答位不同时标「起点」', /startTag/.test(client) && /const startHere = servedIdx !== null && servedIdx !== p1Slot/.test(client));
+check('芯片标签跟真实作答位走', /label = lbl\(currentIdx\);/.test(client));
+check('标题徽章跟真实作答位走', /badgeCurrent', \{ label: lbl\(currentIdx\) \}/.test(client));
+check('芯片 title 跟真实作答位走', /\$\{lbl\(currentIdx\)\} \$\{effHealth\.text\}/.test(client));
+check('P1 行可切换态也按作答位判', /enabled && !p1IsCurrent/.test(client));
+check('不再用游标口径画「当前」', !/lbl\(effective\)/.test(client));
 check('底部先说上一轮谁答的（跳过 N 条）', /reqServed/.test(client) && /reqServedDirect/.test(client));
 
 if (failures.length) {

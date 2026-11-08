@@ -716,6 +716,8 @@ function createRouter(config, log) {
     staleHalfOpen,
     PROBE_TIMEOUT_MS,
     sessionCursor,
+    cursorFor,
+    setCursor,
     /**
      * 取某条路由的电路对象（探测记账用）。
      * probeOne 住在 apply 半区，看不到 createRouter 的闭包——旧实现直接裸调
@@ -2014,9 +2016,12 @@ export function apply(ctx, pluginConfig = {}) {
         // 真正的故障转移由 llm/stream 中间件（runFallbackChain）在该请求的流上完成。
         if (cfg && cfg.provider && cfg.model) {
           router.noteSessionModel(sessionId, cfg.provider, cfg.model);
-          noteRequest(-1, cfg.provider, cfg.model, sessionId);
+          // 不在这里写 lastRequest：那只是「提案」（selection=P1），真正发出去的路由
+          // 由 runFallbackChain 的 markRequest 记账。写 -1 会让面板在请求刚起步时
+          // 把「上一轮 P6」闪成「正在请求 P1」，与 sticky 锚点自相矛盾。
           runtimePin(-1);
-          router.setInFlight(sessionId, -1);
+          // 不再把本会话 inFlight 重置成 -1：那会让面板在请求刚起步时把「当前」
+          // 退回 selection（P1），等真正发出去才跳 P6 —— 用户看到的闪变就是它。
           lastProposal = null;
           router.runtime.lastProposal = null;
           router.touch();
@@ -2170,7 +2175,7 @@ export function apply(ctx, pluginConfig = {}) {
   // 产生前后矛盾的半截回答，所以必须停在那条路由上。
   /**
    * 构造「按顺序尝试」的真实路由链：会话模型（P1）优先，其次队列（纯物理序）；
-   * 去重、排除自身。方案A：队列物理顺序就是尝试顺序，没有隐藏的 pinned 参与。
+   * 去重、排除自身。队列物理顺序就是尝试顺序，没有隐藏的 pinned 参与。
    */
   function buildFallbackChain(sessionId) {
     const queue = config.queue || [];
@@ -2187,11 +2192,30 @@ export function apply(ctx, pluginConfig = {}) {
     const p1Pos = config.p1Follow ? -1 : 0;
     const ring = config.p1Follow ? [-1, ...queue.map((_, i) => i)] : queue.map((_, i) => i);
     const routeAt = (pos) => (pos === -1 ? router.sessionModelFor(sessionId) : queue[pos]);
-    // 会话隔离的手动切换：本会话若有手动目标，就从那条开始按环序尝试（真正生效，
-    // 而不只是改显示）。否则默认从 P1 槽（p1Follow）或队列头（静态）起步。
+    // 起步位置（按会话隔离）：
+    //  1) 本会话有手动目标 → 从手动目标起跑（用户明确指定，最高优先级）；
+    //  2) 否则从「本会话锚点」起跑——锚点 = 上一轮真正作答成功的那条路由
+    //     （sessionCursor，按会话隔离）。粘滞策略下 P6 可用就一直从 P6 起跑，
+    //     不再每条消息都重撞 P1、造成面板先闪 P1 再跳回 P6；
+    //  3) 都没有 → P1 槽（p1Follow）或队列头（静态）。
     const manual = router.manualFor(sessionId);
+    const cursorPos = router.cursorFor(sessionId).activeIndex;
     let startPos = p1Pos;
-    if (Number.isInteger(manual) && (manual === -1 || queue[manual])) startPos = manual;
+    if (Number.isInteger(manual) && (manual === -1 || queue[manual])) {
+      startPos = manual;
+    } else if (Number.isInteger(cursorPos) && (cursorPos === -1 || queue[cursorPos])) {
+      startPos = cursorPos;
+    }
+    // 探测回切（probe）：锚点不在 P1、且 P1 已恢复可用了，并且距上次切走已过
+    // failbackDelayMs 防抖 → 本轮先从 P1 试一次（由真实请求顺带验证，不额外烧探测）。
+    // 粘滞（sticky）不自动回 P1；手动回切（manual）永不自动回 P1。
+    if (startPos !== p1Pos && config.failbackMode === 'probe') {
+      const p1Route = routeAt(p1Pos);
+      const switchedAt = router.lastSwitchFor(sessionId)?.at || 0;
+      const delay = Number(config.failbackDelayMs) || 0;
+      const debounced = delay > 0 && switchedAt > 0 && (Date.now() - switchedAt) < delay;
+      if (!debounced && p1Route && router.isAvailable(p1Route, Date.now())) startPos = p1Pos;
+    }
     const startAt = ring.indexOf(startPos);
     const order = startAt >= 0 ? [...ring.slice(startAt), ...ring.slice(0, startAt)] : ring;
     for (const pos of order) push(routeAt(pos));
@@ -2326,6 +2350,9 @@ export function apply(ctx, pluginConfig = {}) {
         ? -1
         : (config.queue || []).findIndex((r) => router.keyOf(r) === routeKey);
       const markRequest = (state, code) => {
+        // 实际发出去的是哪条，就把本会话的 inFlight 指到哪条：面板的「当前」在
+        // 请求进行中（还没有 ok 记录）也要显示这条，而不是回退到 selection=P1。
+        router.setInFlight(sessionId, routeIdx);
         router.setLastRequest(sessionId, {
           index: routeIdx,
           provider: route.provider,
@@ -2375,7 +2402,12 @@ export function apply(ctx, pluginConfig = {}) {
           yield chunk;
           if (isFinish) {
             finished = true;
-            if (!failedFinish) { router.recordSuccess(route); markRequest('ok'); }
+            if (!failedFinish) {
+              router.recordSuccess(route);
+              // 锚点：本轮哪条真正作答，下一轮就从哪条起跑（按会话隔离）。
+              router.setCursor(sessionId, routeIdx);
+              markRequest('ok');
+            }
             return;
           }
         }
@@ -2401,6 +2433,7 @@ export function apply(ctx, pluginConfig = {}) {
       if (yieldedVisible) {
         // 已吐内容后子流正常结束却没有 finish：补一个 stop 终态，避免下游挂起。
         router.recordSuccess(route);
+        router.setCursor(sessionId, routeIdx);
         markRequest('ok');
         yield { type: 'finish', reason: { kind: 'stop' } };
         return;

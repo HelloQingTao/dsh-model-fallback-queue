@@ -1843,7 +1843,7 @@ window.__ModuleLoader__.load({
         label = 'P!';
         tone = anyRevivable ? 'warn' : 'error';
       } else {
-        label = lbl(effective);
+        label = lbl(currentIdx);
         tone = effHealth.tone;
       }
 
@@ -1954,7 +1954,7 @@ window.__ModuleLoader__.load({
           {
             className: 'fq-badge',
             onClick: () => setOpen((v) => !v),
-            title: `${t('failoverTitle')} · ${lbl(effective)} ${effHealth.text}${effHealth.detail ? ` · ${effHealth.detail}` : ''}`,
+            title: `${t('failoverTitle')} · ${lbl(currentIdx)} ${effHealth.text}${effHealth.detail ? ` · ${effHealth.detail}` : ''}`,
             'aria-label': t('failoverTitle'),
             style: {
               position: 'relative',
@@ -2023,7 +2023,7 @@ window.__ModuleLoader__.load({
                   : allTripped
                     ? h(Badge, { tone: anyRevivable ? 'warn' : 'error' },
                         anyRevivable ? t('badgeTrippedRevivable') : t('badgeAllTripped'))
-                    : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(effective) })),
+                    : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(currentIdx) })),
               ),
               // 面板顶部不再放独立提示行：探测结果 / 切换失败都并到底部工具条左侧，
               // 「上一轮真实请求」那行用户明确说没必要，已删除（面板空间留给路由本身）。
@@ -2033,7 +2033,7 @@ window.__ModuleLoader__.load({
                 { style: { padding: '4px 8px', display: 'flex', flexDirection: 'column' } },
                 h('div', {
                     key: 'p1-row',
-                    ...(enabled && !p1Active
+                    ...(enabled && !p1IsCurrent
                       ? rowSwitchProps(false, p1Follow ? -1 : 0, 'P1')
                       : enabled && p1Follow
                         ? {
@@ -2051,11 +2051,11 @@ window.__ModuleLoader__.load({
                       // 行间用一条极淡的分割线，比纯靠间距更清楚又不显眼。
                       borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                       background: p1IsCurrent ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
-                      cursor: enabled && (p1Follow || !p1Active) ? 'pointer' : 'default',
+                      cursor: enabled && (p1Follow || !p1IsCurrent) ? 'pointer' : 'default',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
-                  h('span', { style: { flex: 1, opacity: p1Active ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  h('span', { style: { flex: 1, opacity: p1IsCurrent ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                     p1Follow ? t('sessionModelSuffix', { name: p1DisplayName }) : p1DisplayName),
                   p1IsCurrent
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
@@ -2170,7 +2170,7 @@ window.__ModuleLoader__.load({
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: 6, flex: 'none' } },
                   // 已经在 P1 就不给"切回 P1"按钮（-1/静态 0 都算在 P1）
-                  enabled && !p1Active
+                  enabled && !p1IsCurrent
                     ? h(
                         'button',
                         {
