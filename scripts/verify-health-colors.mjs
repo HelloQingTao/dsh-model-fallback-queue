@@ -74,7 +74,9 @@ mustMatch('说明点明不参与排序与故障转移', client, /paidHint: '[^']
 
 // ---------- 2. 芯片颜色来自健康，而不是"在不在 P1" ----------
 mustNotMatch('芯片 tone 不再由 p1Active 决定', client, /tone = p1Active \? 'ok' : 'warn'/);
-mustMatch('芯片取生效路由条目', client, /const effEntry = effective < 0 \? p1Entry : entries\.find/);
+// 芯片取"现在谁在答"那条（有成功记录时），不是游标——否则 P1 熔断、P6 兜底时
+// 芯片红着却一直在正常回话（用户实测的自相矛盾）。
+mustMatch('芯片取当前作答路由条目', client, /const effEntry = currentIdx < 0 \? p1Entry : entries\.find/);
 mustMatch('芯片颜色来自 healthOf', client, /tone = effHealth\.tone/);
 mustMatch('标题徽章颜色也来自 health', client, /h\(Badge, \{ tone: effHealth\.tone \}, t\('badgeCurrent'/);
 
@@ -431,6 +433,19 @@ check('无法归因时退回「探测失败」', unknownCase.text === 'healthPro
 check('没有解锁时刻时不编倒计时', !/healthRecoverIn/.test(unknownCase.short), unknownCase.short);
 check('宿主下发 probeResetAt', /probeResetAt: c\.probeResetAt/.test(index));
 check('探测成功清掉解锁时刻', /c\.probeResetAt = 0;/.test(index));
+
+// ---------- 9. 「当前」必须标在真正作答的那条上 ----------
+// 用户实测的困惑：P1–P5 全红、P6 兜底答了话，面板却写「当前 P1」+「无切换记录」，
+// 连模型自述都是 P1 的名字（它看到的就是 P1 的模型名）。根因是「当前」绑的是游标，
+// 不是"这一轮谁答的"。下面把这套口径钉死。
+check('失败请求带跳过条数', /skipped: Math\.max\(0, full\.indexOf\(route\)\)/.test(index));
+check('失败请求带实际尝试次数', /attempts,/.test(index));
+check('前端用成功记录判定真正作答的路由', /lastReq\.state === 'ok'/.test(client));
+check('「当前」优先取真实作答位', /const currentIdx = servedIdx !== null \? servedIdx : effective;/.test(client));
+check('P1 行也用同一口径判当前', /const p1IsCurrent = servedIdx !== null \? servedIdx === p1Slot : p1Active;/.test(client));
+check('队列行高亮跟真实作答位走', /const isActive = servedIdx !== null \? servedIdx === e\.index : effective === e\.index;/.test(client));
+check('游标与作答位不同时标「起点」', /startTag/.test(client) && /const startHere = servedIdx !== null && servedIdx !== p1Slot/.test(client));
+check('底部先说上一轮谁答的（跳过 N 条）', /reqServed/.test(client) && /reqServedDirect/.test(client));
 
 if (failures.length) {
   console.error(`✗ ${failures.length} 项失败 / ${pass + failures.length} 项`);

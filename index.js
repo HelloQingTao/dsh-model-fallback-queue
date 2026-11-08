@@ -2310,7 +2310,11 @@ export function apply(ctx, pluginConfig = {}) {
     }
     let lastFailure = null;
     let lastError = null;
+    // 本轮已经试过几条：面板要用它说清「这一轮是第 6 条兜底答的，前面跳过了 5 条」，
+    // 否则用户只能看到模型名还挂在 P1 上、以为 P1 在干活。
+    let attempts = 0;
     for (const route of chain) {
+      attempts += 1;
       if (options?.signal?.aborted) {
         yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: '请求已取消' } } };
         return;
@@ -2330,6 +2334,10 @@ export function apply(ctx, pluginConfig = {}) {
           at: Date.now(),
           state,
           code: code ?? null,
+          // 「前面还有几条没接住」：按整条链的位置算（含熔断被跳过、没真正试的），
+          // 这样面板说的「跳过 N 条」与用户看到的 P 编号对得上。
+          skipped: Math.max(0, full.indexOf(route)),
+          attempts,
           settledAt: state === 'sent' ? null : Date.now(),
         });
         router.setPendingConfirm(sessionId, null);

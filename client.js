@@ -115,6 +115,9 @@ window.__ModuleLoader__.load({
         noFallbacks: '暂无后备——到设置页添加 P2/P3…',
         recentSwitch: '最近切换 {from} → {to}',
         noSwitchRecord: '无切换记录',
+        startTag: '起点',
+        reqServed: '上一轮 {label} 作答 · 跳过 {n} 条 · {ago}',
+        reqServedDirect: '上一轮 {label} 作答 · {ago}',
         failbackTitle: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
         failbackAction: '切回 P1',
         clickToSwitch: '点击切换到 {label}',
@@ -295,6 +298,9 @@ window.__ModuleLoader__.load({
         noFallbacks: 'No fallbacks yet — add P2/P3… in settings',
         recentSwitch: 'Last switch {from} → {to}',
         noSwitchRecord: 'No switch history',
+        startTag: 'Start',
+        reqServed: 'Answered by {label} · {n} skipped · {ago}',
+        reqServedDirect: 'Answered by {label} · {ago}',
         failbackTitle: 'Switch the active route back to P1 (the current session model under p1Follow)',
         failbackAction: 'Switch back to P1',
         clickToSwitch: 'Click to switch to {label}',
@@ -1796,6 +1802,21 @@ window.__ModuleLoader__.load({
       // P1 是否就是当前生效位置（P1 槽 = -1；静态模式下 P1 = queue[0]）
       const activeIsP1 = p1Follow ? active < 0 : active === 0;
       const p1Active = p1Follow ? effective < 0 : effective === 0;
+      // 「当前」应该指着**真正在服务的路由**，不是"下一轮会从哪起跑"（游标）。
+      // 用户实测的困惑：P1–P5 全挂、P6 兜底答了话，面板却标着「当前 P1」、
+      // 模型名还挂在大泡菜上，于是他以为 P1 在干活。这里用 lastRequest 的成功记录
+      // 拿到真正接管的 P 位；没有证据（还没成功过）才退回游标口径。
+      const scopedLR = props.sessionId && snap?.sessionLastRequest?.[props.sessionId];
+      const lastReq = scopedLR || snap?.lastRequest || null;
+      const served = lastReq && lastReq.state === 'ok' && Number.isInteger(lastReq.index) ? lastReq : null;
+      // P1 行对应的位置：p1Follow 下是 -1，静态模式下是队列 0（也画在 P1 行）。
+      const p1Slot = p1Follow ? -1 : 0;
+      const servedIdx = served ? served.index : null;
+      const currentIdx = servedIdx !== null ? servedIdx : effective;
+      const p1IsCurrent = servedIdx !== null ? servedIdx === p1Slot : p1Active;
+      // 游标（下一轮从哪起跑）与"真正在服务的那条"不一致时，给起点行一个弱标记，
+      // 让用户能同时看到两件事：现在谁在答、下一条会先找谁。
+      const startHere = servedIdx !== null && servedIdx !== p1Slot && effective === p1Slot;
       // P1 已被顶掉（超时/限流失效）但仍在兜底——以 P1 自己的电路状态判定，
       // 而不是拿队列第一条（那是 P2）当 P1。
       const p1Leaning = Boolean(p1Entry && p1Entry.state !== 'closed');
@@ -1809,7 +1830,9 @@ window.__ModuleLoader__.load({
       // "P3 有问题"，其实黄只说明"你离开了 P1"。一个颜色只能表达一件事，而用户要的是
       // 健康与前瞻："这条模型现在还靠谱吗、多久前确认过"。
       const now = Date.now();
-      const effEntry = effective < 0 ? p1Entry : entries.find((x) => x.index === effective);
+      // 芯片颜色要跟"现在谁在答"走：P1 熔断但 P6 在兜底时，芯片不该是红的
+      // （那正是用户看到的自相矛盾：回复正常、芯片却报警）。没有成功记录才退回游标。
+      const effEntry = currentIdx < 0 ? p1Entry : entries.find((x) => x.index === currentIdx);
       const effHealth = healthOf(effEntry, snap, now);
       let label;
       let tone;
@@ -2027,16 +2050,16 @@ window.__ModuleLoader__.load({
                       display: 'flex', alignItems: 'center', gap: 10, padding: '4px 8px', borderRadius: 8, fontSize: 12,
                       // 行间用一条极淡的分割线，比纯靠间距更清楚又不显眼。
                       borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                      background: p1Active ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      background: p1IsCurrent ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                       cursor: enabled && (p1Follow || !p1Active) ? 'pointer' : 'default',
                     },
                   },
                   h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
                   h('span', { style: { flex: 1, opacity: p1Active ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                     p1Follow ? t('sessionModelSuffix', { name: p1DisplayName }) : p1DisplayName),
-                  p1Active
+                  p1IsCurrent
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
-                    : null,
+                    : (startHere ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', opacity: 0.8 } }, t('startTag')) : null),
                   // 没有 P1 视图（还没发过消息、拿不到会话模型）时不能写"正常"：
                   // 那是在替一条从未验证过的路由打包票。
                   healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('healthUnprobed')),
@@ -2048,7 +2071,8 @@ window.__ModuleLoader__.load({
                   ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t('noFallbacks'))]
                   : entries.map((e) => {
                       // 队列下标就是生效位置，直接比（p1Follow 下 e.index===0 是 P2，不再排除）
-                      const isActive = effective === e.index;
+                      const isActive = servedIdx !== null ? servedIdx === e.index : effective === e.index;
+                      const startHereRow = servedIdx !== null && servedIdx !== e.index && effective === e.index;
                       return h(
                         'div',
                         {
@@ -2074,7 +2098,7 @@ window.__ModuleLoader__.load({
                         ),
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
-                          : null,
+                          : (startHereRow ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', opacity: 0.8 } }, t('startTag')) : null),
                         probeBadge(snap?.probeStatus?.[`${e.provider}\u0000${e.model}`]),
                         healthBadge(e, snap, Date.now()),
                         reviveButton(e, e.index),
@@ -2118,7 +2142,21 @@ window.__ModuleLoader__.load({
                       },
                       (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
                     )
-                  : (() => {
+                  : (served
+                    // 有真实成功记录时，这一行先说"上一轮到底谁答的"——用户实测的困惑：
+                    // P1–P5 全挂、P6 兜底答了话，底部却只写"无切换记录"，于是他以为
+                    // 是 P1 在干活（连模型自述都是 P1 的名字，因为它看到的就是 P1 的模型名）。
+                    ? h('span', {
+                        style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 },
+                        title: t(served.skipped ? 'reqServed' : 'reqServedDirect', {
+                          label: lbl(servedIdx), n: served.skipped || 0,
+                          ago: fmtAge(Math.max(0, now - (served.settledAt || served.at))),
+                        }),
+                      }, t(served.skipped ? 'reqServed' : 'reqServedDirect', {
+                        label: lbl(servedIdx), n: served.skipped || 0,
+                        ago: fmtAge(Math.max(0, now - (served.settledAt || served.at))),
+                      }))
+                    : (() => {
                       // from===to 是空操作（老宿主会记），不显示成"P2 → P2"
                       // 会话隔离：优先本会话的最近切换（sessionLastSwitch），无则回退全局镜像。
                       const sw = (props.sessionId && snap?.sessionLastSwitch?.[props.sessionId])
@@ -2127,7 +2165,7 @@ window.__ModuleLoader__.load({
                         sw && sw.from !== sw.to
                           ? t('recentSwitch', { from: lbl(sw.from), to: lbl(sw.to) })
                           : t('noSwitchRecord'));
-                    })(),
+                    })()),
                 h(
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: 6, flex: 'none' } },
