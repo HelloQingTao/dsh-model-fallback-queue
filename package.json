@@ -25,7 +25,8 @@
     "assets",
     "docs/design-plan.md",
     "docs/feature-spec.md",
-    "state.js"
+    "state.js",
+    "docs/migration-0.2.2-rc.1.md"
   ],
   "license": "MIT",
   "author": "HelloQingTao",

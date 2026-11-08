@@ -42,12 +42,14 @@ export function statePath() {
 /**
  * 把任意输入收敛成合法的队列数组。
  * 只保留 {provider, model} 都是非空字符串的条目；每条补齐 v2 字段：
- *   - pinned: boolean，恒存在（大保底 = 最后兜底），缺省 false
  *   - tier: 可选厂商分组标签（如 "A"/"B" 或厂商 id），仅用于 UI 分组展示
  *   - paid: 'free'|'paid'|'unknown'，默认 'unknown'（不瞎猜免费/付费）
  * 其余字段丢弃。
+ *
+ * 顺序：数组顺序就是唯一真相 = 界面顺序 = 尝试顺序（方案A：纯物理序，不再有
+ * 隐藏的「大保底」参与排序）。历史文件里遗留的 extra 字段在读入时被丢弃。
  * @param {unknown} raw
- * @returns {Array<{provider: string, model: string, pinned: boolean, paid: 'free'|'paid'|'unknown', tier?: string}>}
+ * @returns {Array<{provider: string, model: string, paid: 'free'|'paid'|'unknown', tier?: string}>}
  */
 export function normalizeQueue(raw) {
   if (!Array.isArray(raw)) return [];
@@ -60,7 +62,6 @@ export function normalizeQueue(raw) {
     out.push({
       provider,
       model,
-      pinned: item.pinned === true,
       paid: item.paid === 'free' || item.paid === 'paid' ? item.paid : 'unknown',
       ...(typeof item.tier === 'string' && item.tier ? { tier: item.tier } : {}),
     });
@@ -89,7 +90,7 @@ export async function readQueueState() {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object') return null;
     // 版本挂载点：只认受支持的版本（v1 老文件 / v2 新文件，或缺省 version 的早期文件）。
-    // v1 条目缺 pinned/paid/tier —— normalizeQueue 负责补默认字段；迁移 = 补完字段后
+    // v1 条目缺 paid/tier —— normalizeQueue 负责补默认字段；迁移 = 补完字段后
     // 落盘成 v2 一次（幂等：下次再读就是 v2，不会重复写）。
     const ver = parsed.version === undefined ? 1 : parsed.version;
     if (!SUPPORTED_VERSIONS.includes(ver)) return null;

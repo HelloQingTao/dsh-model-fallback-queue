@@ -1,5 +1,7 @@
 # 四大功能施工规格 · feature-spec
 
+> **变更说明（2026-11-08，方案A）**：已移除「大保底 / pinned」机制。本文件下方关于 pinned 的描述是**历史设计**；现行实现为**纯物理顺序 = 尝试顺序**，队列行支持拖动排序，费用标记改为中性小胶囊 + 「标记」按钮。以 README 与代码为准。
+
 > 插件：dsh-model-fallback-queue（v0.2.5 → v0.3.0）
 > 分支：feat/model-select-and-pin · 状态：规格定稿，供 engineer/verifier/reviewer 依据
 > 日期：2026-10-23 · 编写：designer（requirements & design）

@@ -52,10 +52,25 @@ function extractConst(src, name) {
 }
 
 // ---------- 1. 价格不再占用颜色通道 ----------
-const paidTagSrc = extractFunction(client, 'paidTag');
-mustNotMatch('paidTag 不再用绿色', paidTagSrc, /#3a9e5f/);
-mustNotMatch('paidTag 不再用琥珀色', paidTagSrc, /#c98a1b/);
-mustMatch('paidTag 使用中性 secondary 色', paidTagSrc, /label-secondary/);
+const paidBtnSrc = extractFunction(client, 'paidBadge');
+mustNotMatch('paidBadge 不用绿色', paidBtnSrc, /state-success/);
+mustNotMatch('paidBadge 不用琥珀/警告色', paidBtnSrc, /state-warning/);
+mustMatch('paidBadge 使用中性 secondary 色', paidBtnSrc, /label-secondary/);
+mustNotMatch('paidBadge 不再有 paidTag 旧实现', client, /function paidTag\(/);
+// 标准功能做在 chip 本身上：paidBadge 支持 onClick 时渲染成可点击 button，不再额外挂「标记」图标按钮
+mustMatch('paidBadge 支持点击切换', paidBtnSrc, /onClick/);
+mustMatch('paidBadge 可点击时渲染 button', paidBtnSrc, /h\('button'/);
+mustNotMatch('队列行不再单独挂 paidCycleBtn 标记按钮', client, /t\('paidCycleBtn'\)/);
+// tip 尺寸回到原来那个小胶囊（12px 字体 + 90px 最小宽 / 18~20px 行高那一版），别再抽大
+mustMatch('paidBadge 恢复原小尺寸（fontSize 10 + 窄 padding）', paidBtnSrc, /fontSize: 10[\s\S]{0,200}?padding: '0 4px'/);
+mustNotMatch('paidBadge 不再是药丸大胶囊', paidBtnSrc, /borderRadius: 999/);
+// 关键坑回归：button 上绝不能出现 `font: 'inherit'` 简写——它会重置 base 的 fontSize/lineHeight，
+// 让胶囊瞬间变成大字号（用户两次反馈「tip 还是这么大」的真凶）。
+mustNotMatch('paidBadge 不用 font 简写（会重置字号变大）', paidBtnSrc, /font:\s*'inherit'/);
+mustMatch('paidBadge 只继承字体族/字重', paidBtnSrc, /fontFamily:\s*'inherit'/);
+// 底部要有「费用标注用途」说明：只是备注，不参与排序/故障转移/自动判定
+mustMatch('底部有费用标注用途说明', client, /t\('paidHint'\)/);
+mustMatch('说明点明不参与排序与故障转移', client, /paidHint: '[^']*不参与排序[^']*故障转移/);
 
 // ---------- 2. 芯片颜色来自健康，而不是"在不在 P1" ----------
 mustNotMatch('芯片 tone 不再由 p1Active 决定', client, /tone = p1Active \? 'ok' : 'warn'/);
@@ -85,10 +100,11 @@ mustNotMatch('不再有 pingDefaultsMigrated 闸门', index, /pingDefaultsMigrat
 mustNotMatch('不再有 pingSkipPaidMigrated 闸门', index, /pingSkipPaidMigrated/);
 
 // ---------- 维护者评审：两条必修 + 一条建议的回归锁 ----------
-// 必修 1：pingAll 的 RPC 声明必须与实现同为「零参数」。
+// 必修 1：pingAll 的 RPC 声明必须与实现、调用点**三者参数个数一致**。
 // 曾声明 [{name:'opts'}] 而三个调用点全不传参 → 网关拒绝每次点击：
 // client api: ...expected 1 argument(s), got 0，而失败只 console.warn，
 // 界面毫无动静，用户以为"探测完成、一切正常"。
+// 现在这个参数是 sessionId（P1 槽按发起方会话取），调用点一律显式传。
 {
   const declStart = client.indexOf("method: 'pingAll'");
   check('pingAll 声明存在于 client', declStart > 0);
@@ -99,14 +115,47 @@ mustNotMatch('不再有 pingSkipPaidMigrated 闸门', index, /pingSkipPaidMigrat
     .slice(declStart, declEnd)
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\/\*[\s\S]*?\*\//g, '');
-  mustMatch('pingAll RPC 声明为无参（与实现一致）', decl, /parameters:\s*\[\s*\]/);
+  mustMatch('pingAll RPC 声明含 sessionId 形参', decl, /parameters:\s*\[[\s\S]*?name: 'sessionId'/);
   mustNotMatch('pingAll 不再要求 opts 参数', decl, /name:\s*'opts'/);
 }
-mustMatch('pingAll 实现不收参', index, /async pingAll\(\)\s*\{/);
+mustMatch('pingAll 实现收 sessionId（P1 按会话取）', index, /async pingAll\(sessionId\)\s*\{/);
+// 设置页「探测全部」排除 P1：拆出独立 pingQueue；两个入口各调各的，不互相污染。
+// sessionId 只是为了与 pingAll 同签名（设置页无会话上下文，传 undefined）。
+mustMatch('pingQueue 实现收 sessionId（设置页探测全部排除 P1）', index, /async pingQueue\(sessionId\)\s*\{/);
+mustMatch('pingQueue 声明含 sessionId 形参', client, /method: 'pingQueue'[\s\S]{0,300}?name: 'sessionId'/);
+mustMatch('设置页探测全部调用 pingQueue', client, /const r = await host\.pingQueue\(\)/);
+mustMatch('芯片面板探测全部透传 sessionId', client, /host\.pingAll\(props\.sessionId\)/);
+mustMatch('pingQueue 已挂 markRemoteMethods', index, /'pingQueue'/);
 mustMatch('设置页探测失败会提示', client, /setErr\(t\('probeAllFailed'/);
+// 用户要求：探测全部按钮在队列标题右侧；周期探测收进高级折叠区（UI 隐藏、后端保留）
+mustMatch('探测全部按钮在队列标题行（标题+按钮同一行）', client, /justifyContent: 'space-between'[\s\S]{0,400}?onClick: probeAll/);
+mustMatch('周期探测收进默认折叠的高级区', client, /showProbeAdv/);
+mustMatch('周期探测折叠默认关闭', client, /\[showProbeAdv,\s*setShowProbeAdv\]\s*=\s*React\.useState\(false\)/);
+mustMatch('后端 pingIntervalMs 能力保留', index, /pingIntervalMs/);
 mustMatch('芯片面板探测失败会提示', client, /t\('probeAllFailed'/);
 mustMatch('探测失败文案存在', client, /probeAllFailed:/);
 mustMatch('探测失败原因映射存在', client, /PROBE_REASON_KEYS/);
+
+// ---- 「探测 2 个可用 → 等会全红」的回归锁 ----
+// 两件事必须同时成立，否则用户永远只能怀疑插件坏了：
+//  a) 探测通过但仍在熔断冷却里的路由，状态不能说成"完全不能用"，要能一键放行；
+//  b) 全熔断时一条消息只发一条，不能把整条链再打一遍（否则冷却被不断刷新）。
+mustMatch('快照下发 revivable（探测通过但仍在熔断）', index, /revivable: c\.state === CIRCUIT\.OPEN/);
+mustMatch('revivable 要求探测发生在这次熔断之后', index, /\(c\.lastProbeAt \|\| 0\) > \(c\.openedAt \|\| 0\)/);
+mustMatch('reviveRoute 只降到 half_open（不是无条件复原）', index, /function reviveRoute\(route\)[\s\S]{0,400}?c\.state = CIRCUIT\.HALF_OPEN/);
+mustMatch('reviveRoute 校验证据（没有熔断后探测成功就拒绝）', index, /if \(!isRevivable\(route\)\) return \{ ok: false, reason: 'no-evidence' \}/);
+mustMatch('reviveRoute 已挂 RPC 服务', index, /reviveRoute\(index, sessionId\)/);
+mustMatch('reviveRoute 已挂 markRemoteMethods', index, /'reviveRoute'\]/);
+mustMatch('reviveRoute 已在 client 声明', client, /method: 'reviveRoute'/);
+mustMatch('前端有可恢复状态文案', client, /stateRevivable: '可恢复'/);
+mustMatch('前端红色里先判 revivable', client, /if \(e\.revivable\) \{\s*\n\s*return \{\s*\n?\s*tone: 'warn'/);
+mustMatch('行内恢复按钮只在 revivable 时出现', client, /const reviveButton = \(e, idx\) => \(enabled && e\?\.revivable\)/);
+mustMatch('恢复按钮拦冒泡（否则顺手切路由）', client, /onClick: \(ev\) => \{ ev\.stopPropagation\(\); void revive\(idx, e\); \}/);
+mustMatch('探测汇总单列「可用但仍在冷却」', client, /probeAllRevivable/);
+mustMatch('全熔断时只留一条候选', index, /function soonestRecoveringRoute\(chain\)/);
+mustMatch('全熔断分支真的用上单发候选', index, /if \(allMelted\) \{\s*\n\s*const one = soonestRecoveringRoute\(full\)/);
+mustMatch('芯片/面板认可恢复的全熔断（不再整片报红）', client, /allTripped[\s\S]{0,200}?anyRevivable \? 'warn' : 'error'/);
+mustMatch('全熔断但可恢复时徽章单独用词', client, /badgeTrippedRevivable: '全部熔断 · 可恢复'/);
 
 // 必修 2：周期探测必须在 settings 加载完之后再排一次。
 // apply 体里的 schedulePing() 跑在 loadSettings() 之前，那时 config 还是默认值，
@@ -130,15 +179,30 @@ mustMatch('paid title 使用点击后语义', client, /t\('paidNextFree'\)/);
 
 // ---- 切换的真实性：只能由「真实请求」证明，不能由探测伪造 ----
 mustNotMatch('切换时不再发探测（旧实现会写出 NO_SESSION_MODEL 假失败）', index, /verifyRoute/);
-mustMatch('切换只记等待位', index, /r\.pendingConfirm = \{ index: i, at: Date\.now\(\) \}/);
+mustMatch('切换只记等待位', index, /setPendingConfirm\(sessionId, \{ index: i, at: Date\.now\(\) \}\)/);
 mustMatch('manualFailback 返回 pending', index, /return \{ ok: true, pending:/);
 mustMatch('快照下发 pendingConfirm', index, /pendingConfirm: runtime\.pendingConfirm/);
 mustMatch('快照下发 lastRequest', index, /lastRequest: runtime\.lastRequest/);
-mustMatch('agent/request 记录真实请求', index, /noteRequest\(idx, route\.provider, route\.model, sessionId\)/);
+// ---- 手动切换会话隔离 ----
+mustMatch('manualFailback 接收 sessionId', index, /manualFailback\(index, sessionId\)/);
+mustMatch('手动切换按会话写游标（不经全局 resetSessionCursors）', index, /manualSwitch\(sessionId, i\)/);
+mustMatch('快照下发 sessionManual', index, /sessionManual: Object\.fromEntries\(sessionManual\)/);
+mustMatch('快照下发 sessionLastSwitch', index, /sessionLastSwitch: Object\.fromEntries\(sessionLastSwitch\)/);
+mustMatch('快照下发 sessionLastRequest', index, /sessionLastRequest: Object\.fromEntries\(sessionLastRequest\)/);
+mustMatch('客户端切换透传 sessionId', client, /host\.manualFailback\(idx, props\.sessionId\)/);
+mustMatch('客户端读 per-session 手动目标', client, /snap\.sessionManual\[props\.sessionId\]/);
+mustMatch('客户端读 per-session 最近请求', client, /snap\?\.sessionLastRequest\?\.\[sid\]/);
+mustMatch('buildFallbackChain 从会话手动目标起步', index, /const manual = manualFor\(sessionId\)/);
+mustMatch('agent/request 记录真实请求（方案B：不改 provider/model，仅观测）', index, /noteRequest\(-1, cfg\.provider, cfg\.model, sessionId\)/);
+mustMatch('方案B：agent/request 不再覆盖路由', index, /return cfg;/);
+mustMatch('方案B：llm/stream 中间件存在', index, /ctx\.on\('llm\/stream'/);
+mustMatch('方案B：子请求标记 internal 防递归', index, /internalStreamOptions\.add\(subOpts\)/);
 mustMatch('真实请求失败改判 lastRequest', index, /state: 'fail',/);
 mustMatch('真实请求成功改判 lastRequest', index, /lr\.state === 'sent'/);
 // 探测体只带最小合法字段；两个模式共用同一个请求构造（real 只是换了一条普通问话）
-mustMatch('探测体只用最小字段', index, /messages: \[\{\s*role: 'user',\s*content: mode === 'real'/s);
+// content 必须是 block 数组（[{type:'text',text}]）：裸字符串会被 0.2.2-rc.1 的
+// pi-ai 适配层 assertSupportedHistory 的 content.some() 整条拒掉。
+mustMatch('探测体只用最小字段', index, /messages: \[\{\s*role: 'user',\s*content: \[\{\s*type: 'text',\s*text: mode === 'real'/s);
 mustMatch('探测被拒不冒充风险', index, /PROBE_UNSUPPORTED/);
 mustMatch('默认探测跳过付费条目', index, /pingSkipPaid: true/);
 // 探测体大小可配（1 是会被网关拒绝的历史默认，默认值必须是更安全的值）
@@ -243,7 +307,7 @@ const cases = [
   ['closed 且从未测过 → 灰', healthOf({ state: 'closed', lastOkAt: null, lastProbeAt: null }, snap, now), 'muted'],
   ['closed 且刚探测成功 → 绿', healthOf({ state: 'closed', lastProbeAt: now - 5_000, lastOkAt: now - 5_000, probeOk: true, probeLatencyMs: 800 }, snap, now), 'ok'],
   ['closed 且探测失败 → 黄', healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: false }, snap, now), 'warn'],
-  ['closed 且证据过期 → 灰', healthOf({ state: 'closed', lastProbeAt: now - 60 * 60_000, lastOkAt: now - 60 * 60_000, probeOk: true }, snap, now), 'muted'],
+  ['closed 且证据很旧仍显示上次结果 → 绿（不再降级为过期）', healthOf({ state: 'closed', lastProbeAt: now - 60 * 60_000, lastOkAt: now - 60 * 60_000, probeOk: true }, snap, now), 'ok'],
   ['closed 但响应很慢 → 黄', healthOf({ state: 'closed', lastProbeAt: now - 5_000, lastOkAt: now - 5_000, probeOk: true, probeLatencyMs: 9_000 }, snap, now), 'warn'],
   ['真实请求成功也算证据', healthOf({ state: 'closed', lastOkAt: now - 5_000 }, snap, now), 'ok'],
   ['付费且未测过 → 灰并解释跳过', healthOf({ state: 'closed', paid: 'paid', lastOkAt: null, lastProbeAt: null }, snap, now), 'muted'],
@@ -256,10 +320,10 @@ const skipPaidDetail = healthOf({ state: 'closed', paid: 'paid', lastOkAt: null,
 check('未验证的付费条目解释"跳过付费"', skipPaidDetail === 'healthSkipPaidHint', skipPaidDetail);
 const unverifiedFree = healthOf({ state: 'closed', paid: 'free', lastOkAt: null, lastProbeAt: null }, snap, now).detail;
 check('未验证的免费条目解释"没有结果"', unverifiedFree === 'healthUnprobedHint', unverifiedFree);
-// 周期探测关掉时，过期阈值回落到固定 15 分钟
+// 用户要求：不再有「证据过期」降级——没有新一轮检测/状态更新就一直显示上次结果
 const offSnap = { pingIntervalMs: 0, pingSkipPaid: true };
-check('探测关闭时 16 分钟前的证据算过期',
-  healthOf({ state: 'closed', lastOkAt: now - 16 * 60_000 }, offSnap, now).tone === 'muted');
+check('探测关闭时 16 分钟前的证据仍显示上次结果（不降级过期）',
+  healthOf({ state: 'closed', lastOkAt: now - 16 * 60_000 }, offSnap, now).tone === 'ok');
 check('探测关闭时 10 分钟前的证据仍算可用',
   healthOf({ state: 'closed', lastOkAt: now - 10 * 60_000 }, offSnap, now).tone === 'ok');
 
@@ -272,7 +336,46 @@ check('刚切换时显示等待确认', /t\('pendingConfirm'/.test(client));
 check('面板不再有验证横幅', !/verifyText/.test(client));
 check('面板不再有颜色图例占位', !/t\('legendHealth'\)/.test(client));
 check('面板不再有宿主确认行', !/snap\?\.hostConfirmed/.test(client));
+// 芯片面板精简（用户实测要求）：① 删掉「上一轮真实请求」独立行（用户说"没啥必要"）
+// ② 探测/切换反馈并到底部工具条左侧同一行，不再单独占一行
+// ③ 队列行间距缩小（padding 7px→4px 8px）并加极淡分割线。
+check('面板删掉上一轮真实请求独立行', !/const line = requestLineText\(/.test(client));
+check('面板探测/切换反馈并入底部工具条（flash 在左槽）', /bottom:\s*'calc\(100% \+ 10px\)'/.test(client)
+  && /flash\s*\?\s*h\(\s*'span'/.test(client));
+check('面板行间距缩小 + 极淡分割线', (client.match(/padding: '4px 8px'/g) || []).length >= 2
+  && /borderBottom: '1px solid var\(--dsw-elevation-stroke-color/.test(client));
 check('没有 P1 视图时不写"正常"', !/healthBadge\(p1Entry, snap, now\) \|\| h\(Badge, \{ tone: 'muted' \}, t\('stateOk'\)\)/.test(client));
+// 用户嫌 emoji 圆点「好复古」：健康状态点改成扁平的纯色实心小圆点（无渐变无高光），取宿主静态色板
+check('健康状态点用扁平纯色（非 emoji）', /HEALTH_DOT/.test(client) && /--dsw-static-green-500/.test(client));
+check('健康状态点不用渐变高光', !/radial-gradient/.test(client));
+check('健康状态点不再用 emoji 圆点', !/🟢|🟡|🔴|⚪/.test(client));
+check('健康状态点尺寸小巧（8px 圆点）', /width: 8[\s\S]{0,80}?height: 8/.test(client));
+check('设置页图例不再用 emoji 圆点', !/legend: '[^']*🟢/.test(client));
+// 用户要求图例前恢复彩色小圆点（和队列行同款扁平点，不用 emoji）：用一个 legendItem(tone,labelKey)
+// 渲染四个 HEALTH_DOT 颜色点 + 文字，而不再是一整串纯文本。
+check('设置页图例恢复彩色圆点（legendItem + HEALTH_DOT 四色）', /function legendItem\(tone, labelKey\)/.test(client)
+  && /legendItem\('ok', 'legendOk'\)/.test(client)
+  && /legendItem\('warn', 'legendWarn'\)/.test(client)
+  && /legendItem\('error', 'legendError'\)/.test(client)
+  && /legendItem\('muted', 'legendMuted'\)/.test(client)
+  && /background: HEALTH_DOT\[tone\]/.test(client));
+// 逐条探测状态（探测中 → 探测完成 → 消失）：后端下发 probeStatus + TTL 自动清空，前端逐行渲染 probeBadge
+check('后端：探测逐条状态 probeStatus + TTL', /probeStatus: null/.test(index) && /probeStatusUntil/.test(index)
+  && /probeStatusTtlMs/.test(index));
+check('后端：probeAllRoutes 写 probing/done 状态', /state: 'probing'/.test(index) && /state: 'done'/.test(index));
+check('前端：逐行渲染 probeBadge（设置页 + 芯片面板）', /function probeBadge\(status\)/.test(client)
+  && (client.match(/probeBadge\(/g) || []).length >= 3);
+// 探测汇总必须报「总条数」并说明含 P1：队列只显示 P2..Pn，但探测会把 P1（会话模型）
+// 一起探，旧文案只报 X/Y，用户数队列 4 条却看到 3+2=5 会质疑（实测）。
+check('前端：探测汇总报总条数 + 注明含 P1', /function probeSummary\(results\)/.test(client)
+  && /hasP1 = list\.some\(\(x\) => x\.index === -1\)/.test(client)
+  && /共 \{total\} 条/.test(client) && /含 P1 当前模型/.test(client)
+  && !/probeAllDone: '探测完成：\{ok\} 可用/.test(client));
+check('前端：探测中设置页实时轮询快照', /probeLive/.test(client) && /setInterval\(async \(\) =>/.test(client));
+// 模型选择弹框底部漏出横向滚动条：行 width:100% + 左右 padding 缺 box-sizing → 溢出。
+// 修法：滚动容器 overflowX:'hidden' + 组头/模型行都加 boxSizing:'border-box'。
+check('弹框列表不横向溢出（overflowX hidden + box-sizing）', /overflowY: 'auto', overflowX: 'hidden'/.test(client)
+  && (client.match(/boxSizing: 'border-box'/g) || []).length >= 2);
 check('设置页上报表单失败', /if \(!r\?\.ok\) setErr\(t\('saveFailed'/.test(client));
 check('设置页不再永久卡在加载中', /\.\.\.\(s \|\| \{\}\)/.test(client));
 check('探测被拒不画成黄色风险', /PROBE_UNSUPPORTED/.test(client));

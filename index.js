@@ -62,6 +62,13 @@ const DEFAULT_CONFIG = {
   // 长期挂着"探测不支持/探测失败"——探测体的形状问题冒充满模型的问题。
   // 默认 8：多花 7 个 token（约 ¥0.00001/次），换探测真正能成立。
   pingMaxTokens: 8,
+  // 「探测全部」的并发数。旧实现一条条串行 ping，每条约 1–15s，队列一长（6 条）
+  // 就要等十几秒甚至更久——用户实测「太慢了」。这些探测彼此独立、都是极短请求，
+  // 完全可以限并发并跑：墙钟时间约等于「最慢的一条」而不是「全部之和」。
+  // 默认 4：既明显变快，又不会一次性把网关打爆（付费/限流网关对突发敏感）。
+  probeConcurrency: 4,
+  // 「探测完成」逐条状态在快照里保留多久（毫秒），到点自动清空/淡出。
+  probeStatusTtlMs: 4000,
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -203,6 +210,52 @@ function normalizeReason(message) {
 }
 
 /**
+ * 从上游报错原文里解析「什么时候恢复出网」。
+ *
+ * 现实里上游写恢复时刻有三种方式，都必须认：
+ *  - ISO 8601（本机 magpie 的 bili 闸门）：
+ *      `bili is holding outbound sends until 2026-11-08T06:15:51.683Z`
+ *  - 本地时间（channel-pack）：
+ *      `最近一个将于 2026/10/30 00:00:00 解锁`
+ *  - 只有相对时长（bili 的报文里也带一份）：
+ *      `(~180s, exponential backoff)`
+ *
+ * 为什么值得解析：宿主 dsh-llm-retry 的规则是「providerRetryAfterMs > maxDelayMs
+ * 就放弃这次重试」。把闸门的到期时刻换算成 providerRetryAfterMs，一次用户消息
+ * 就能从「链长 × 6 次 429」降到「链长 × 1 次」，不需要改宿主。
+ *
+ * @param {unknown} message 上游错误原文
+ * @returns {number} epoch ms；解析不出返回 0（绝不猜一个时长）
+ */
+function parseResetAt(message) {
+  const text = typeof message === 'string' ? message : '';
+  if (!text) return 0;
+  // 1) ISO 8601：带时区，交给 Date.parse，不受本机时区影响
+  const iso = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))/.exec(text);
+  if (iso) {
+    const ms = Date.parse(iso[1]);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  // 2) 本地时间：按月/日/时:分（秒可省）构造，与用户看到的钟点一致
+  const local = /(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(text);
+  if (local) {
+    const ms = new Date(+local[1], +local[2] - 1, +local[3], +local[4], +local[5], +(local[6] || 0)).getTime();
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  // 3) 只有相对时长：必须同时带上「在等什么」的措辞才认。
+  //    否则 "upstream timeout after 15s" 这种普通超时文案会被误读成
+  //    「15 秒后恢复」，UI 上凭空多出一个倒计时。
+  if (/hold|backoff|retry|resume|wait|恢复|重试|等待/i.test(text)) {
+    const rel = /(?:~|about\s+|in\s+)?(\d{1,5})\s*(?:s|secs?|seconds?)\b/i.exec(text);
+    if (rel) {
+      const secs = Number(rel[1]);
+      if (Number.isFinite(secs) && secs > 0) return Date.now() + secs * 1000;
+    }
+  }
+  return 0;
+}
+
+/**
  * 把请求配置换成队列里的目标路由，并**剥掉推理档位**。
  *
  * 为什么必须剥：cfg.reasoningEffort（如 'balanced'）是「上一台模型」的能力选择。
@@ -284,6 +337,11 @@ function createRouter(config, log) {
     lastSwitch: null, // { from, to, code, at }
     revision: 0, // 状态版本号，客户端据此判断是否需要重新拉 snapshot
     probeInFlight: false,
+    // 全员探测的「逐条状态」：{ [provider\0model]: { state:'probing'|'done', ok } }。
+    // 让前端在每条路由旁显示「探测中 → 探测完成」，而不是只有干巴巴一个总进度。
+    // 探测结束后保留 PROBE_STATUS_TTL_MS（4s）再自动清空（前端据此让它淡出）。
+    probeStatus: null,
+    probeStatusUntil: null, // epoch ms；到点后 snapshot 惰性清空 probeStatus
     // 全员探测进度：{ done, total } | null。
     // 旧实现只有 probingAll 布尔，前端文案「探测中… 0/N」里的 N 永远传 0 ——
     // 宣称的 n/N 进度从未实现。现在由 probeAllRoutes 每探完一条就更新，
@@ -334,8 +392,9 @@ function createRouter(config, log) {
     // 此时"没有记录"是手动切换的结果，不是新会话）；否则从 P1 槽起步——新会话不该
     // 继承别的会话因熔断产生的切换进度。
     // 全局 activeIndex 只反映"曾经有会话切过多深"，供探测/预检选起点，不污染新会话。
+    const manual = manualFor(sessionId);
     if (cur === undefined) return {
-      activeIndex: Number.isInteger(runtime.manualIndex) ? runtime.manualIndex : p1Position(),
+      activeIndex: Number.isInteger(manual) ? manual : p1Position(),
     };
     return { activeIndex: cur }; // 只读视图，写经 setCursor
   }
@@ -347,6 +406,53 @@ function createRouter(config, log) {
     sessionCursor.set(sessionId, idx);
     // 全局游标记录历史最深切换（探测/预检等无会话路径用它选起点）
     if (idx > runtime.activeIndex) runtime.activeIndex = idx;
+  }
+  // ---- 会话隔离的手动目标 / 等待位 / 最近切换 / 最近真实请求 ----
+  // 旧实现里 manualFailback 写全局 runtime.manualIndex 并 resetSessionCursors() 清空
+  // **所有**会话游标——一个会话手动切换会把其它会话一起拖走。现在这些全部按 sessionId
+  // 记账；runtime 上的同名字段只保留为"最近一次"的全局镜像，供无会话上下文的旧读取
+  // 路径回退（探测/老客户端）。真正的会话隔离靠下面四张 Map。
+  const sessionManual = new Map();         // sessionId -> index（手动切换目标，null=无）
+  const sessionPendingConfirm = new Map(); // sessionId -> {index, at}
+  const sessionLastSwitch = new Map();     // sessionId -> {from,to,code,at}
+  const sessionLastRequest = new Map();    // sessionId -> {index,provider,model,at,state,code,settledAt}
+  function manualFor(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return runtime.manualIndex;
+    const v = sessionManual.get(sessionId);
+    return v === undefined ? null : v;
+  }
+  function setManual(sessionId, idx) {
+    if (typeof sessionId !== 'string' || !sessionId) { runtime.manualIndex = idx; return; }
+    if (idx === null || idx === undefined) sessionManual.delete(sessionId);
+    else sessionManual.set(sessionId, idx);
+    runtime.manualIndex = idx; // 全局镜像（旧读取路径）
+  }
+  function pendingConfirmFor(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return runtime.pendingConfirm;
+    return sessionPendingConfirm.get(sessionId) || null;
+  }
+  function setPendingConfirm(sessionId, val) {
+    if (typeof sessionId !== 'string' || !sessionId) { runtime.pendingConfirm = val; return; }
+    if (val) sessionPendingConfirm.set(sessionId, val); else sessionPendingConfirm.delete(sessionId);
+    runtime.pendingConfirm = val; // 镜像
+  }
+  function lastSwitchFor(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return runtime.lastSwitch;
+    return sessionLastSwitch.get(sessionId) || null;
+  }
+  function setLastSwitch(sessionId, val) {
+    if (typeof sessionId !== 'string' || !sessionId) { runtime.lastSwitch = val; return; }
+    if (val) sessionLastSwitch.set(sessionId, val); else sessionLastSwitch.delete(sessionId);
+    runtime.lastSwitch = val; // 镜像
+  }
+  function lastRequestFor(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return runtime.lastRequest;
+    return sessionLastRequest.get(sessionId) || null;
+  }
+  function setLastRequest(sessionId, val) {
+    if (typeof sessionId !== 'string' || !sessionId) { runtime.lastRequest = val; return; }
+    if (val) sessionLastRequest.set(sessionId, val); else sessionLastRequest.delete(sessionId);
+    runtime.lastRequest = val; // 镜像
   }
 
   /** 任何会改变运行态/电路的操作都应调用它：bump 版本号 → 通知客户端拉新快照 */
@@ -501,6 +607,45 @@ function createRouter(config, log) {
   }
 
   /**
+   * 「探测已通过，但电路还锁着」——这是唯一能把红色变成**可操作**证据的组合：
+   * 失败确实发生过（OPEN），但之后的探测又真的拿到了回话。
+   *
+   * 顺序很重要：探测必须发生在**这次熔断之后**（lastProbeAt > openedAt）。
+   * 否则一条几个月前的成功探测会让每一次新熔断都显得"可恢复"——那是骗人的。
+   */
+  function isRevivable(route) {
+    if (!route || !route.provider || !route.model) return false;
+    const c = circuitOf(keyOf(route));
+    return c.state === CIRCUIT.OPEN
+      && c.probeOk === true
+      && (c.lastProbeAt || 0) > (c.openedAt || 0);
+  }
+
+  /**
+   * 「立即恢复」：把探测已通过、却仍锁在熔断里的路由放出来。
+   *
+   * 只降到 HALF_OPEN，**不是**无条件 CLOSED：探测成功不代表真实请求能成
+   * （见 recordProbeSuccess 的长注释）。半开正好表达"下一条真实请求说了算"——
+   * 成功就 recordSuccess 转 CLOSED，失败就重新 OPEN，熔断账本没有被提前擦掉。
+   * 这也是 recordProbeSuccess 只救 HALF_OPEN 那条规则的延续：
+   * 救人这件事需要**用户明确点一下**，而不是探测器自己把锁撬开。
+   *
+   * @param {{provider:string, model:string}} route
+   * @returns {{ok:boolean, reason?:string}}
+   */
+  function reviveRoute(route) {
+    if (!route || !route.provider || !route.model) return { ok: false, reason: 'no-route' };
+    if (!isRevivable(route)) return { ok: false, reason: 'no-evidence' };
+    const c = circuitOf(keyOf(route));
+    c.state = CIRCUIT.HALF_OPEN;
+    c.openedAt = 0;
+    c.halfOpenAt = Date.now();
+    c.failures = 0;
+    touch();
+    return { ok: true };
+  }
+
+  /**
    * UI 指示器要显示的"实际生效路由"索引。
    * 优先级：最近一次真的发出去的请求 > 已挂起等待替换的路由。
    * -1 表示本次请求没被本插件覆盖（放行原配置）——此时 P1 才真的是"当前"。
@@ -521,7 +666,7 @@ function createRouter(config, log) {
     const r = (config.queue || [])[pos];
     return r ? isAvailable(r, now) : false;
   }
-  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈）。pinned 条目恒排最后（大保底）。 */
+  /** 从 startIndex 出发的候选位置顺序（不含自身，绕一圈）。纯物理队列序（方案A，无大保底）。 */
   function nextPositions(startIndex) {
     const queue = config.queue || [];
     const n = queue.length;
@@ -536,28 +681,9 @@ function createRouter(config, log) {
       const base = at >= 0 ? at : 0;
       for (let step = 1; step <= ring.length - 1; step += 1) out.push(ring[(base + step) % ring.length]);
     }
-    return reorderPinnedLast(out, queue);
+    return out;
   }
 
-  /**
-   * 把候选序里属于 pinned 条目的位置统一抽出来追加到序列末尾（大保底 = 最后兜底）。
-   * - 非 pinned 位置保持原相对顺序（仍是"健康状况相近时按物理序顺延"）；
-   * - pinned 位置保持它们之间的相对物理序（多个大保底按队列序顺延）；
-   * - -1 = P1 槽，无队列条目可查 → 恒视为非 pinned，留在最前（P1 是当前会话模型，本就该最先试）。
-   * 全 pin 时等效于没 pin（没 pin 的在前，全部 pin 就是原物理序），退化安全。
-   * @param {number[]} positions
-   * @param {Array<{pinned?: boolean}>} queue
-   * @returns {number[]}
-   */
-  function reorderPinnedLast(positions, queue) {
-    const pinned = [];
-    const rest = [];
-    for (const p of positions) {
-      const r = p >= 0 ? queue[p] : null;
-      (r && r.pinned === true ? pinned : rest).push(p);
-    }
-    return [...rest, ...pinned];
-  }
   /**
    * 邻近可用：从 startIndex 起找第一个可用位置；粘滞模式绕回 P1 槽仅当其余全不可用。
    * @returns {number|null} 位置（-1 = P1 槽）；null = 一个可用的都没有（null 不等于 -1）
@@ -576,6 +702,8 @@ function createRouter(config, log) {
     circuits,
     keyOf,
     isAvailable,
+    isRevivable,
+    reviveRoute,
     recordFailure,
     recordSuccess,
     recordProbeSuccess,
@@ -604,6 +732,16 @@ function createRouter(config, log) {
     setInFlight,
     /** 读某会话的实际路由（无会话上下文回退全局值） */
     inFlightFor,
+    // 会话隔离的读/写助手，供 apply 半区（noteRequest / request-error / assistant-stream /
+    // 面板运行时记录）使用 —— 这几处也按 sessionId 记账，不能写全局单值。
+    lastRequestFor,
+    setLastRequest,
+    lastSwitchFor,
+    setLastSwitch,
+    pendingConfirmFor,
+    setPendingConfirm,
+    setManual,
+    manualFor,
     /** 清空所有会话游标（手动回切/会话清理用）；返回清除的条数 */
     resetSessionCursors() {
       const n = sessionCursor.size;
@@ -619,8 +757,8 @@ function createRouter(config, log) {
      */
     retryFromP1(sessionId) {
       // 用户手选模型 = 明确要回 P1：清掉之前的手动切换意图，否则下次没记录的会话
-      // 仍会按旧的手动目标走。
-      runtime.manualIndex = null;
+      // 仍会按旧的手动目标走。会话隔离：只清本会话的手动目标，不动别的会话。
+      setManual(sessionId, null);
       setCursor(sessionId, p1Position());
       setInFlight(sessionId, p1Position());
       runtime.lastProposal = null;
@@ -631,6 +769,10 @@ function createRouter(config, log) {
       let touched = sessionCursor.delete(sessionId);
       touched = sessionInFlight.delete(sessionId) || touched;
       touched = sessionModelBySession.delete(sessionId) || touched;
+      touched = sessionManual.delete(sessionId) || touched;
+      touched = sessionPendingConfirm.delete(sessionId) || touched;
+      touched = sessionLastSwitch.delete(sessionId) || touched;
+      touched = sessionLastRequest.delete(sessionId) || touched;
       if (touched) touch();
     },
     /** 手动回切：清掉所有会话的 inFlight，回到指定索引（全局意图） */
@@ -638,6 +780,35 @@ function createRouter(config, log) {
       sessionInFlight.clear();
       runtime.inFlightIndex = idx;
       touch();
+    },
+    /**
+     * 手动切换（会话隔离版）：只把**本会话**的游标/inFlight/手动目标拨到 i，
+     * 并记本会话的等待位与最近切换。不再清空所有会话（旧全局意图的 bug）。
+     * 无 sessionId 时退回全局语义（老调用/无会话上下文），保持向后兼容。
+     */
+    manualSwitch(sessionId, i) {
+      const scoped = typeof sessionId === 'string' && sessionId;
+      const from = scoped
+        ? (Number.isInteger(sessionInFlight.get(sessionId)) ? sessionInFlight.get(sessionId)
+          : (Number.isInteger(cursorFor(sessionId).activeIndex) ? cursorFor(sessionId).activeIndex : p1Position()))
+        : (runtime.inFlightIndex >= 0 ? runtime.inFlightIndex : runtime.activeIndex);
+      if (scoped) {
+        setCursor(sessionId, i);
+        setInFlight(sessionId, i);
+        setManual(sessionId, i);
+        if (from !== i) setLastSwitch(sessionId, { from, to: i, code: 'MANUAL', at: Date.now() });
+        setPendingConfirm(sessionId, { index: i, at: Date.now() });
+      } else {
+        resetSessionCursors();
+        runtime.activeIndex = i;
+        runtime.manualIndex = i;
+        resetSessionInFlight(i);
+        if (from !== i) runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
+        runtime.pendingConfirm = { index: i, at: Date.now() };
+      }
+      runtime.lastVerify = null;
+      touch();
+      return { ok: true, pending: { ...(scoped ? pendingConfirmFor(sessionId) : runtime.pendingConfirm) } };
     },
     health,
     HEALTH,
@@ -728,13 +899,13 @@ function createRouter(config, log) {
       if (chosen === null && canFallbackToP1 === null) chosen = pickFrom(cur, { allowP1: true, now });
       if (chosen === null) return -1; // 全熔断：放行原配置（降级）
       if (chosen !== cur) {
-        runtime.lastSwitch = {
+        setLastSwitch(sessionId, {
           from: cur,
           to: chosen,
           // 回切到 P1 时标记 PROBE_FAILBACK，便于 UI/日志区分"故障切换"与"恢复回切"
           code: chosen === p1Pos && mode === 'probe' ? 'PROBE_FAILBACK' : undefined,
           at: Date.now(),
-        };
+        });
         setCursor(sessionId, chosen);
         touch();
       }
@@ -782,9 +953,10 @@ function createRouter(config, log) {
       // 挂掉的这条，同样切不出去。
       setCursor(sessionId, pos);
       recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
-      // 手动意图随失败失效：用户手选的那条挂了，manualIndex 必须清掉，否则新会话
-      // （或游标被清空之后）会继续回落到这条已经判死的路由，表现成"切走了又自己跳回去"。
-      if (runtime.manualIndex === pos) runtime.manualIndex = null;
+      // 手动意图随失败失效：用户手选的那条挂了，本会话的 manual 目标必须清掉，否则
+      // 新会话（或游标被清空之后）会继续回落到这条已经判死的路由，表现成"切走了又
+      // 自己跳回去"。会话隔离：只清本会话，不动别的会话的手动目标。
+      if (manualFor(sessionId) === pos) setManual(sessionId, null);
       // capability：请求形状（推理档位）不被这条模型接受。recordFailure 已按
       // 「不计失败、不熔断」分流，所以 resolveIndex 会认为它"仍然可用"并原地返回
       // 同一条——那样这一轮请求就白挂了。这里显式跳过失败位置一次：换一条路由能
@@ -797,7 +969,7 @@ function createRouter(config, log) {
         }
         setCursor(sessionId, next);
         setInFlight(sessionId, next);
-        runtime.lastSwitch = { from: pos, to: next, code, at: Date.now() };
+        setLastSwitch(sessionId, { from: pos, to: next, code, at: Date.now() });
         touch();
         return true;
       }
@@ -813,7 +985,7 @@ function createRouter(config, log) {
           return false;
         }
         setInFlight(sessionId, p1Pos);
-        runtime.lastSwitch = { from: pos, to: p1Pos, code, at: Date.now() };
+        setLastSwitch(sessionId, { from: pos, to: p1Pos, code, at: Date.now() });
         touch();
         return true;
       }
@@ -826,13 +998,19 @@ function createRouter(config, log) {
       // "当前"标记在下一轮 agent/request 瀑布跑过之前都指错对象（P3 在跑却显示 P2）。
       setInFlight(sessionId, nextIdx);
       // lastSwitch 由 resolveIndex 写入（可能为 null：起点本来就不可用时它直接返回，
-      // 没有记录）——直接 .code = 会 TypeError 把整个失败处理吞掉。
-      if (runtime.lastSwitch) runtime.lastSwitch = { ...runtime.lastSwitch, code };
+      // 没有记录）——直接 .code = 会 TypeError 把整个失败处理吞掉。按会话读回再补码。
+      const ls = lastSwitchFor(sessionId);
+      if (ls) setLastSwitch(sessionId, { ...ls, code });
       touch();
       return true;
     },
-    snapshot() {
+    snapshot(sessionId) {
       const queue = config.queue || [];
+      // P1 槽属于**调用方会话**：面板/芯片带着自己的 sessionId 来取。
+      // 旧实现固定读全局 sessionModel，于是新开的会话看到的是上一个会话的模型
+      // （用户实测：新会话点「探测全部」，P1 行红的是别的会话的模型）。
+      const sid = typeof sessionId === 'string' && sessionId ? sessionId : null;
+      const p1Model = sessionModelFor(sid);
       /** 一条路由的电路视图：entries（队列条目）与 p1（P1 槽）共用，字段完全一致 */
       const view = (route) => {
         const key = keyOf(route);
@@ -868,6 +1046,12 @@ function createRouter(config, log) {
           probeError: c.lastProbeCode ? { code: c.lastProbeCode, message: c.lastProbeMessage || null } : null,
           // 已知解锁时刻（限流）→ 前端用它算倒计时；不知道就是 null，不编一个。
           probeResetAt: c.probeResetAt || null,
+          // 「探测已通过但仍在熔断」：前端据此把红色换成可操作的"可恢复 + 恢复按钮"。
+          // 不给这个布尔，前端只能自己拿 lastProbeAt/openedAt 拼时间戳（三处各拼一遍，
+          // 迟早有一处漏判，红色就永远是红色）。
+          revivable: c.state === CIRCUIT.OPEN
+            && c.probeOk === true
+            && (c.lastProbeAt || 0) > (c.openedAt || 0),
         };
       };
       return {
@@ -876,7 +1060,9 @@ function createRouter(config, log) {
         activeIndex: runtime.activeIndex,
         // 手动切换目标：客户端在"本会话还没有请求记录"时用它显示生效路由，
         // 修「切到 P4 了但芯片仍写 P1、P4 行不高亮」。
+        // 全局镜像（旧客户端回退）+ 按会话映射（真正隔离，见下）。
         manualIndex: runtime.manualIndex,
+        sessionManual: Object.fromEntries(sessionManual),
         inFlightIndex: runtime.inFlightIndex,
         // per-session inFlight 映射随快照下发：客户端按当前会话取自己的显示值，
         // 修「会话1在 P3、会话2在 P2 时芯片互相覆盖」的问题。
@@ -890,8 +1076,9 @@ function createRouter(config, log) {
         sessionModelBySession: Object.fromEntries(sessionModelBySession),
         // P1 槽自己的电路视图（p1Follow 下 P1 = 会话模型，不在 config.queue 里）。
         // 老客户端读不到它会退回 entries[0]，保持向后兼容。
-        p1: config.p1Follow && sessionModel
-          ? { provider: sessionModel.provider, model: sessionModel.model, ...view(sessionModel) }
+        // 按调用方 sessionId 取模型：P1 行名与健康态必须来自同一个会话。
+        p1: config.p1Follow && p1Model
+          ? { provider: p1Model.provider, model: p1Model.model, sessionId: sid, ...view(p1Model) }
           : null,
         lastSwitch: runtime.lastSwitch,
         // 手动切换后的等待位：UI 用它显示「已切到 P3，等下次请求确认」。
@@ -899,6 +1086,10 @@ function createRouter(config, log) {
         // 真实请求证据：最近一条真的发出去的请求走了哪条、结果如何。
         // 这是「切换到底生效没有」唯一可信的答案（游标只是意图，探测只是旁证）。
         lastRequest: runtime.lastRequest ? { ...runtime.lastRequest } : null,
+        // ---- 按会话的切换事实（会话隔离：客户端按自己 sessionId 取，互不串味）----
+        sessionLastSwitch: Object.fromEntries(sessionLastSwitch),
+        sessionPendingConfirm: Object.fromEntries(sessionPendingConfirm),
+        sessionLastRequest: Object.fromEntries(sessionLastRequest),
         // 旧字段：恒为 null，保留给老客户端，避免读不到就当成"验证失败"。
         lastVerify: null,
         // 宿主确认的"最近一轮实际使用的路由"（来自宿主回写的 model/selection），
@@ -918,8 +1109,7 @@ function createRouter(config, log) {
           index: i,
           provider: r.provider,
           model: r.model,
-          // F2/F3/F1 前端需要的新字段：pinned（大保底）、paid（免费/付费）、tier（厂商分组）
-          pinned: r.pinned === true,
+          // F3/F1 前端需要的新字段：paid（免费/付费）、tier（厂商分组）
           paid: r.paid === 'free' || r.paid === 'paid' ? r.paid : 'unknown',
           tier: typeof r.tier === 'string' && r.tier ? r.tier : null,
           ...view(r),
@@ -930,6 +1120,16 @@ function createRouter(config, log) {
         // 「探测中… n/N」的 n 只能硬编码 0。
         probingDone: runtime.probeProgress ? runtime.probeProgress.done : 0,
         probingTotal: runtime.probeProgress ? runtime.probeProgress.total : 0,
+        // 逐条探测状态：{ 'provider\0model': { state:'probing'|'done', ok } }。
+        // 到 TTL 后惰性清空（不在这里 touch，避免 snapshot 构造期触发重入；前端轮询下一拍即感知消失）。
+        probeStatus: (() => {
+          if (runtime.probeStatus && runtime.probeStatusUntil && Date.now() > runtime.probeStatusUntil) {
+            runtime.probeStatus = null;
+            runtime.probeStatusUntil = null;
+            return null;
+          }
+          return runtime.probeStatus;
+        })(),
       };
     },
   };
@@ -981,9 +1181,9 @@ class FallbackQueueService extends TypertRemoteService {
     this.config = serviceBridge.config;
   }
 
-  /** 运行态快照 */
-  snapshot() {
-    return this.router.snapshot();
+  /** 运行态快照（sessionId 可选：P1 槽按该会话取，缺省退回全局镜像） */
+  snapshot(sessionId) {
+    return this.router.snapshot(sessionId);
   }
 
   /** 手动探测：强制指定索引的熔断器进半开 */
@@ -999,12 +1199,13 @@ class FallbackQueueService extends TypertRemoteService {
   }
 
   /**
-   * 手动回切：把所有会话游标与全局游标拉回目标位置。
+   * 手动切换：把**本会话**的生效路由拨到目标位置（会话隔离）。
    * index 省略或 -1 = P1 槽（p1Follow 下就是"当前会话模型"）。
+   * sessionId：当前会话 id（RPC 由客户端透传）；缺省时退回旧的全局语义。
    * 注意 p1Follow 下 queue[0] 是 UI 的 P2，不是 P1——老实现固定 i=0 会让"切回 P1"
    * 实际切到 P2，并把 from===to 的空操作也记进历史（UI 显示成 P2 → P2）。
    */
-  manualFailback(index) {
+  manualFailback(index, sessionId) {
     const p1Pos = this.config.p1Follow ? -1 : 0;
     const i = Number.isFinite(index) ? Number(index) : p1Pos;
     if (i === -1) {
@@ -1012,27 +1213,13 @@ class FallbackQueueService extends TypertRemoteService {
     } else if (!this.config.queue?.[i]) {
       return { ok: false };
     }
-    // 切换前的位置：优先"最近实际在跑的那条"，没有就用挂起游标
-    const r = this.router.runtime;
-    const from = r.inFlightIndex >= 0 ? r.inFlightIndex : r.activeIndex;
-    // 手动回切是明确的全局意图：清掉所有会话游标，全部回到目标位置
-    this.router.resetSessionCursors();
-    this.router.runtime.activeIndex = i;
-    // 记下全局手动意图：cursorFor() 对"没有会话记录"的会话据此回落，
-    // 否则清空游标后下一个请求又回到 P1，切换只在 UI 上生效。
-    this.router.runtime.manualIndex = i;
-    // 手动回切后 UI 立刻应显示目标位置，而不是继续显示上次失败的路由。
-    this.router.resetSessionInFlight(i);
-    // from === i 是空操作（已经在 P1 又点了一次）：不记历史，否则出现"P1 → P1"
-    if (from !== i) this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
-    // 旧实现这里立刻发一条 maxTokens=1 的探测，并在拿不到会话模型时写一条
-    // NO_SESSION_MODEL 的红色失败——于是面板上「P1 验证失败」和「P1 正常」同时出现。
-    // 切换的真实性只能由**下一条真实请求**证明：记一个等待位，请求发出去后由
-    // lastRequest 记录它到底走了哪条、成没成。不探测、不伪造结论。
-    r.lastVerify = null;
-    r.pendingConfirm = { index: i, at: Date.now() };
-    this.router.touch();
-    return { ok: true, pending: { ...this.router.runtime.pendingConfirm } };
+    // 会话隔离：只写本会话的游标/inFlight/手动目标/等待位，绝不清空所有会话。
+    // 旧实现这里 resetSessionCursors() 把所有会话一起拖到目标位置——用户明确要求
+    // "某个会话切了只在该会话生效"。无 sessionId 时 router.manualSwitch 退回全局语义。
+    return this.router.manualSwitch(
+      typeof sessionId === 'string' ? sessionId : null,
+      i,
+    );
   }
 
   /** 读当前队列顺序（来自 state 文件，非 settings） */
@@ -1047,15 +1234,31 @@ class FallbackQueueService extends TypertRemoteService {
   }
 
   /**
-   * 全员快速 ping（F4）：对队列每条路由串行发一次微型探测。
+   * 全员快速 ping（F4）：对队列每条路由（含 P1 槽）发一次微型探测，**限并发并跑**。
    * 手动触发（设置页 / 芯片面板按钮），全探（不跳过 paid，用户明确点了就探）。
    * 结果逐条写进电路（recordSuccess/recordFailure），UI 徽章立即反映真实健康。
    * @returns {Promise<{ok: boolean, results?: Array<{index:number,provider:string,model:string,ok:boolean|null,skipped?:boolean}>, reason?: string}>}
    */
-  async pingAll() {
+  async pingAll(sessionId) {
     if (!serviceBridge?.probeAllRoutes) return { ok: false, reason: 'unavailable' };
     try {
-      return await serviceBridge.probeAllRoutes({ skipPaid: false, source: 'manual' });
+      // 芯片面板「探测全部」：探队列全部 + P1 槽（面板把 P1 当一行显示，需要一起探）。
+      // sessionId：P1 槽按**发起方会话**取模型，不能拿全局最近会话凑数。
+      return await serviceBridge.probeAllRoutes({ skipPaid: false, source: 'manual', sessionId });
+    } catch (e) {
+      return { ok: false, reason: 'error', error: e?.message };
+    }
+  }
+
+  /**
+   * 设置页「探测全部」：只探队列中的模型，**排除 P1 槽**（用户要求：队列区只列
+   * P2..Pn，探 P1 会多一条、对不上行数）。与 pingAll 拆成两个零参方法，避免
+   * 设置页与芯片面板共用同一 RPC 时口径互相污染。周期探测仍含 P1。
+   */
+  async pingQueue(sessionId) {
+    if (!serviceBridge?.probeAllRoutes) return { ok: false, reason: 'unavailable' };
+    try {
+      return await serviceBridge.probeAllRoutes({ skipPaid: false, source: 'manual', includeP1: false, sessionId });
     } catch (e) {
       return { ok: false, reason: 'error', error: e?.message };
     }
@@ -1070,16 +1273,34 @@ class FallbackQueueService extends TypertRemoteService {
    * 两者不能混：一个是 RPC 是否成功，一个是上游是否回话。
    * @returns {Promise<{ok: boolean, route?: {provider:string, model:string}, receipt?: object, reason?: string}>}
    */
-  async probeReal(index) {
+  async probeReal(index, sessionId) {
     if (!serviceBridge?.probeRealRoute) return { ok: false, reason: 'unavailable' };
     try {
-      return await serviceBridge.probeRealRoute(index);
+      return await serviceBridge.probeRealRoute(index, sessionId);
     } catch (e) {
       return { ok: false, reason: 'error', error: e?.message };
     }
   }
+
+  /**
+   * 「立即恢复」：把**探测已通过、但仍锁在熔断里**的路由放出来。
+   * index: -1 = P1 槽（按 sessionId 取模型），>=0 = 队列下标。
+   *
+   * 安全性由 router.reviveRoute 兜底：只认"这次熔断之后又探测成功过"的证据，
+   * 无条件放开会把熔断变成摆设（用户只是点了下按钮，不代表厂商已经恢复）。
+   * @returns {{ok:boolean, reason?:string}}
+   */
+  reviveRoute(index, sessionId) {
+    const i = Number.isFinite(Number(index)) ? Number(index) : -1;
+    const sid = typeof sessionId === 'string' && sessionId ? sessionId : null;
+    const target = i === -1
+      ? (this.config.p1Follow ? this.router.sessionModelFor(sid) : (this.config.queue?.[0] || null))
+      : (this.config.queue?.[i] || null);
+    if (!target) return { ok: false, reason: 'no-route' };
+    return this.router.reviveRoute(target);
+  }
 }
-markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue', 'pingAll', 'probeReal']);
+markRemoteMethods(FallbackQueueService.prototype, ['snapshot', 'probe', 'manualFailback', 'getQueue', 'setQueue', 'pingAll', 'pingQueue', 'probeReal', 'reviveRoute']);
 
 export const inject = ['settings', 'llm'];
 
@@ -1104,6 +1325,15 @@ export function apply(ctx, pluginConfig = {}) {
   };
   // llm 是**服务**，不是第二参。可选获取：宿主没装 llm 时（单测/精简环境）不报错。
   const llm = ctx.get ? ctx.get('llm') : ctx.llm;
+
+  // ---- 方案 B：llm/stream 中间件（LLM 层故障转移，不改 selection）----
+  // 0.2.2-rc.1 起 agent/request 不允许再改 provider/model（prepareRequest 会抛
+  // "proposed ... after step preparation fixed ..."），所以换路必须下沉到 LLM 层。
+  // 方案 B 不注册虚拟 provider、不动 agent.model.select()：会话 selection 始终是
+  // 用户真正选的模型（P1），模型选择器/输入框图标正常显示；故障转移在 llm/stream
+  // 瀑布里对该请求的 chunk 流做「先 P1、再队列」的顺序重试（只在还没吐可见内容时换路）。
+  // 代价：assistant 消息 source 仍标 P1（即使实际由 P2 服务），面板「上一轮实际使用」
+  // 显示真实路由以补偿。详见 docs/migration-0.2.2-rc.1.md。
 
   // ---- 设置持久化：namespace = 插件行 id ----
   const NS = 'dsh-model-fallback-queue';
@@ -1279,8 +1509,17 @@ export function apply(ctx, pluginConfig = {}) {
   // 一条微型请求（maxTokens=1，'ping'），拿到一个**成功** chunk 才算可用。
   // F4 的「快速 ping」复用同一套探测逻辑，对队列每条路由做全员扫描，更快发现
   // "还没熔断但已经死了"的模型（API key 失效 / 模型下架 / 网络不通）。
-  let probing = false; // 串行锁：同一时刻至多一个探测请求在飞（半开扫描 + 全员 ping 共用）
-  let probingAll = false; // 全员 ping 进行中（区别于半开扫描的 probing）
+  // 并发探测锁：按「provider\0model」精确到具体路由，而不是全局串行。
+  // 旧实现是单个 `probing` 布尔 —— 同一时刻只许一个探测在飞，于是「探测全部」
+  // 只能一条条排队（6 条就要等十几秒）。现在每个路由各自一把锁：
+  //   · probeRoute（半开扫描）只锁自己那条，跟别条互不阻塞；
+  //   · probeAllRoutes 批量探测时**按 probeConcurrency 并发**跑——彼此独立、都是极短
+  //     请求，墙钟时间≈最慢的一条而不是全部之和；
+  //   · 同一条路由不会被两路同时探（in-flight 去重），避免浪费请求/互相覆盖证据。
+  const probingKeys = new Set();
+  const probeKey = (route) => `${route.provider}\u0000${route.model}`;
+  const isProbingKey = (route) => probingKeys.has(probeKey(route));
+  let probingAll = false; // 全员 ping 进行中（区别于半开扫描的单条锁）
   /** 探测**请求**超时（毫秒）：到点 abort 掉挂起的流。
    *  注意与 router 的 PROBE_TIMEOUT_MS（90s，半开状态等真实请求的最长期限）不是一回事。 */
   const PROBE_REQUEST_TIMEOUT_MS = 15_000;
@@ -1324,12 +1563,9 @@ export function apply(ctx, pluginConfig = {}) {
       c.lastProbeCode = code;
       c.lastProbeMessage = message || '';
       // 上游若给了明确解锁时刻（channel-pack 原话：「…最近一个将于 2026/10/30 00:00:00
-      // 解锁」），就把它记下来：前端能直接显示「1h37m 后恢复」，而不是让用户
-      // 对着「探测失败」守到零点。解析不出时间就清 0，绝不猜一个时长。
-      const resetHit = /(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(String(message || ''));
-      c.probeResetAt = resetHit
-        ? new Date(+resetHit[1], +resetHit[2] - 1, +resetHit[3], +resetHit[4], +resetHit[5], +(resetHit[6] || 0)).getTime()
-        : 0;
+      // 解锁」，bili 则是 ISO 8601），就把它记下来：前端能直接显示「1h37m 后恢复」，
+      // 而不是让用户对着「探测失败」守到零点。解析不出时间就清 0，绝不猜一个时长。
+      c.probeResetAt = parseResetAt(message);
       // ⚠️ 失败也必须记时间戳。旧实现只记错误码不记 lastProbeAt，而前端判
       // 「有没有证据」看的正是这个字段——于是「探测失败」和「从没探测过」在
       // 界面上长得一模一样（都是灰「未测」）。用户点完「探测全部」看到一片
@@ -1359,9 +1595,18 @@ export function apply(ctx, pluginConfig = {}) {
         // 探测体只用最小合法字段：带 name 之类的扩展字段时，一些厂商会直接
         // 400 拒绝，于是「能正常对话的模型」在面板上长期显示探测失败。
         // mode='real' 时发的是一句普通问话——它的意义正是"和真实请求同形"。
+        //
+        // ⚠️ content 必须是 content block 数组，不能是裸字符串。宿主适配层
+        // （dsh-llm-pi-ai 的 assertSupportedHistory）会对 content 调 .some()，
+        // 字符串没有该方法 → 抛 TypeError → 被 adapterStream 吞成失败 chunk
+        // （code UNKNOWN），表现为所有路由探测都"失败"。这是 0.2.2-rc.1 起
+        // 的硬约束，裸字符串会让「探测全部」全员报错。
         messages: [{
           role: 'user',
-          content: mode === 'real' ? '请只回复 OK 两个字母，不要任何解释。' : 'ping',
+          content: [{
+            type: 'text',
+            text: mode === 'real' ? '请只回复 OK 两个字母，不要任何解释。' : 'ping',
+          }],
         }],
         maxTokens,
         ...(controller ? { signal: controller.signal } : {}),
@@ -1498,15 +1743,17 @@ export function apply(ctx, pluginConfig = {}) {
    * 挑剔时，探测失败并不能证明模型不可用——只有发一条和真实对话同形的请求才算证据。
    * 代价是它真的会花 token，所以**只由用户手动点**，不参与周期扫描。
    */
-  async function probeRealRoute(index) {
+  async function probeRealRoute(index, sessionId) {
     if (!llm?.stream) return { ok: false, reason: 'no-stream' };
     const i = Number.isFinite(Number(index)) ? Number(index) : -1;
+    // P1 槽同样按发起方会话取（理由见 probeAllRoutes 的 p1Slot）。
+    const sid = typeof sessionId === 'string' && sessionId ? sessionId : null;
     const target = i === -1
-      ? (config.p1Follow ? router.sessionModelFor(null) : (config.queue?.[0] || null))
+      ? (config.p1Follow ? router.sessionModelFor(sid) : (config.queue?.[0] || null))
       : (config.queue?.[i] || null);
     if (!target) return { ok: false, reason: 'no-route' };
-    if (probing || probingAll) return { ok: false, reason: 'busy' };
-    probing = true;
+    if (probingAll || isProbingKey(target)) return { ok: false, reason: 'busy' };
+    probingKeys.add(probeKey(target));
     try {
       const receipt = await runProbe(target, { mode: 'real' });
       return {
@@ -1515,70 +1762,135 @@ export function apply(ctx, pluginConfig = {}) {
         receipt,
       };
     } finally {
-      probing = false;
+      probingKeys.delete(probeKey(target));
     }
   }
-  // 半开扫描的入口：拿 probing 锁后探一条（一次探一条，串行推进）；
-  // 全员 ping 进行中（probingAll）时不插队，避免与 pingAll 并发。
+  // 半开扫描的入口：只锁「这一条路由」，多条半开路由互不阻塞（各自一把锁）。
+  // 全员 ping 进行中（probingAll）时不插队，避免与 pingAll 并发打满网关。
   async function probeRoute(route) {
-    if (!llm?.stream || probing || probingAll) return;
-    probing = true;
+    if (!llm?.stream || probingAll || isProbingKey(route)) return;
+    probingKeys.add(probeKey(route));
     try {
       return await probeOne(route);
     } finally {
-      probing = false;
+      probingKeys.delete(probeKey(route));
     }
   }
-  // 全员快速 ping：对队列每条路由串行一次性探测。
+  // 全员快速 ping：对队列每条路由（含 P1 槽）做一次性探测。
   //  - skipPaid=true 时跳过 paid==='paid' 的条目（周期扫描省配额；手动按钮传 false 全探）
-  //  - 复用 probing 锁（与半开扫描互斥）；期间置 router.runtime.probeInFlight → snapshot.probingAll
-  //  - 结果逐条 recordSuccess/recordFailure，反映到 UI 徽章
+  //  - 期间置 router.runtime.probeInFlight → snapshot.probingAll
+  //  - **按 probeConcurrency 并发**：旧实现串行一条条等，队列一长就慢到用户抱怨。
+  //    现在限并发并跑；进度按「已完成条数」实时推进（每条落定就 +1），结果按原序填回。
   async function probeAllRoutes(opts = {}) {
     const skipPaid = opts.skipPaid !== false;
-    if (probingAll || probing) return { ok: false, reason: 'busy', results: [] };
+    // 是否连 P1 槽一起探。默认 true（周期探测在后台，探 P1 无 UI 数行数的困扰，
+    // 且越早发现 P1 挂了越好）；设置页手动「探测全部」传 false —— 那里只列队列行，
+    // 用户明确要求「排除 P1、只探队列中的」（把 P1 探出来会多一条，对不上行数）。
+    const includeP1 = opts.includeP1 !== false;
+    if (probingAll) return { ok: false, reason: 'busy', results: [] };
     if (!llm?.stream) return { ok: false, reason: 'no-stream', results: [] };
     probingAll = true;
     router.runtime.probeInFlight = true;
     const queue = config.queue || [];
-    // ⚠️ P1 槽必须一起探。旧实现只遍历 config.queue —— p1Follow 下 P1 = 会话
-    // 模型、根本不在队列里，于是它**永远轮不到探测**，面板上永远是灰「未测」，
-    // 哪怕它正是此刻给用户回话的那条（用户实测：P1 灰色"完全不对"，属实）。
-    // 进度按「本轮真正要探的条数」算：跳过付费时 total 不含被跳过项，
-    // 否则 UI 会永远停在 n/(含跳过) 而看起来没走完。
-    const p1Slot = config.p1Follow ? router.sessionModelFor(null) : null;
-    const planned = (p1Slot ? 1 : 0)
-      + (skipPaid ? queue.filter((r) => r.paid !== 'paid').length : queue.length);
+    // ⚠️ P1 槽（p1Follow 下 = 会话模型，不在 config.queue）默认一起探：旧实现只遍历
+    // config.queue，P1 永远轮不到探测、面板永远灰「未测」（用户实测：P1 灰色"完全不对"）。
+    // 但设置页手动「探测全部」按用户要求只探队列 → 传 includeP1:false 跳过 P1。
+    // 进度按「本轮真正要探的条数」算：跳过付费时 total 不含被跳过项，否则 UI 会停在 n/(含跳过)。
+    // P1 槽按**发起方会话**取：面板上的 P1 行属于当前会话，探测也必须是同一个模型。
+    // 旧实现固定读全局 sessionModel(null)，于是"探测 P1 可用"可能测的是别人会话的模型。
+    const probeSessionId = typeof opts.sessionId === 'string' && opts.sessionId ? opts.sessionId : null;
+    const p1Slot = (includeP1 && config.p1Follow) ? router.sessionModelFor(probeSessionId) : null;
+    // 组装待探列表（保持展示顺序：P1 在前，随后按队列序）。skipped 的付费条目
+    // 直接先占位、不计入 total（它们不发请求）。
+    const tasks = []; // { index, route, skipped }
+    if (p1Slot) tasks.push({ index: -1, route: p1Slot, skipped: false });
+    for (const [i, r] of queue.entries()) {
+      if (skipPaid && r.paid === 'paid') tasks.push({ index: i, route: r, skipped: true });
+      else tasks.push({ index: i, route: r, skipped: false });
+    }
+    const planned = tasks.filter((t) => !t.skipped).length;
     router.runtime.probeProgress = { done: 0, total: planned };
+    // 逐条状态：先把所有待探路由标成 probing（前端立刻显示「探测中」），
+    // 每探完一条改 done。结束后保留一会再自动淡出（见 snapshot 的惰性清理）。
+    router.runtime.probeStatus = {};
+    router.runtime.probeStatusUntil = null;
+    for (const t of tasks) {
+      if (!t.skipped) router.runtime.probeStatus[probeKey(t.route)] = { state: 'probing', ok: null };
+    }
     router.touch();
     const results = [];
     let done = 0;
-    try {
-      if (p1Slot) {
-        // P1 是用户手选的会话模型，没有 paid 标记可言：手动/周期都探它。
-        const ok = await probeOne(p1Slot);
-        results.push({ index: -1, provider: p1Slot.provider, model: p1Slot.model, ok, skipped: false });
-        done += 1;
-        router.runtime.probeProgress = { done, total: planned };
-        router.touch();
-      }
-      for (const [i, r] of queue.entries()) {
-        if (skipPaid && r.paid === 'paid') {
-          results.push({ index: i, provider: r.provider, model: r.model, ok: null, skipped: true });
-          continue;
+    // 限并发跑所有非 skipped 任务。每条落定：写结果、+1 进度、刷新快照。
+    // 若某条已在别处探测中（isProbingKey），跳过它、不计数也不发请求——
+    // 免得两路并发覆盖同一条证据。
+    const conc = Math.max(1, Math.min(16, Math.floor(Number(config.probeConcurrency) || DEFAULT_CONFIG.probeConcurrency)));
+    const runnable = tasks.filter((t) => !t.skipped);
+    let cursor = 0;
+    // 同一条路由在「本轮」只探一次：P1 槽和队列里可能出现同一 provider/model，
+    // 用一个 in-flight Promise 表按 key 去重——后来者复用先到者的结果。
+    const inflight = new Map();
+    const probeShared = (route) => {
+      const key = probeKey(route);
+      if (inflight.has(key)) return inflight.get(key);
+      const p = (async () => {
+        // 若正被半开扫描探着，轮询等它落定再复用，而不是重复发请求。
+        if (isProbingKey(route)) {
+          for (let i = 0; i < 100 && isProbingKey(route); i += 1) {
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          return null; // 半开扫描探完会自行写证据；本批这条标 busy
         }
-        const ok = await probeOne(r); // 已持有 probingAll，无需再抢 probing 锁
-        results.push({ index: i, provider: r.provider, model: r.model, ok, skipped: false });
+        probingKeys.add(key);
+        try {
+          return await probeOne(route);
+        } finally {
+          probingKeys.delete(key);
+        }
+      })();
+      inflight.set(key, p);
+      return p;
+    };
+    const worker = async () => {
+      while (cursor < runnable.length) {
+        const t = runnable[cursor++];
+        const ok = await probeShared(t.route);
+        // revivable：探测通过了，但这条还在熔断冷却里 —— 前端据此把"可用"
+        // 和"可用但被锁着"分开说，并给出「恢复」按钮。
+        results.push({
+          index: t.index,
+          provider: t.route.provider,
+          model: t.route.model,
+          ok,
+          skipped: false,
+          ...(ok === null ? { busy: true } : {}),
+          ...(ok === true && router.isRevivable(t.route) ? { revivable: true } : {}),
+        });
         done += 1;
         router.runtime.probeProgress = { done, total: planned };
+        // 这条探完了：逐条状态从 probing 改 done（busy 记 null，表示本轮没真探）
+        if (router.runtime.probeStatus) {
+          router.runtime.probeStatus[probeKey(t.route)] = { state: 'done', ok: ok === null ? null : ok === true };
+        }
         router.touch(); // 每条探完就推进一次快照 → 前端能实时看到 3/7
       }
+    };
+    try {
+      // 先补齐 skipped 占位（保持结果顺序与 UI 期望一致），再并发跑 runnable。
+      for (const t of tasks) {
+        if (t.skipped) results.push({ index: t.index, provider: t.route.provider, model: t.route.model, ok: null, skipped: true });
+      }
+      await Promise.all(Array.from({ length: Math.min(conc, runnable.length || 1) }, () => worker()));
     } finally {
       probingAll = false;
       router.runtime.probeInFlight = false;
       router.runtime.probeProgress = null; // 结束后清掉，避免下一次快照透出陈旧进度
+      // done 状态不立刻清：留 PROBE_STATUS_TTL_MS 让前端显示「探测完成」再淡出。
+      router.runtime.probeStatusUntil = Date.now() + (Number(config.probeStatusTtlMs) || DEFAULT_CONFIG.probeStatusTtlMs);
       router.touch();
     }
-    ctx.logger?.info?.('[fallback-queue] pingAll(%s): %d probed', opts.source || 'manual', results.length);
+    // 结果按展示顺序（P1 在前、队列序）排好再返回，前端不依赖完成先后。
+    results.sort((a, b) => a.index - b.index);
+    ctx.logger?.info?.('[fallback-queue] pingAll(%s): %d probed (conc=%d)', opts.source || 'manual', results.length, conc);
     return { ok: true, results };
   }
   const probeTimer = setInterval(() => {
@@ -1677,7 +1989,8 @@ export function apply(ctx, pluginConfig = {}) {
    * 同时清掉等待位——已经有真实请求了，不再需要"等下次确认"。
    */
   const noteRequest = (index, provider, model, sessionId) => {
-    router.runtime.lastRequest = {
+    // 会话隔离：真实请求证据按会话记，别的会话的「上一轮实际使用」不串到本会话。
+    router.setLastRequest(sessionId, {
       index,
       provider,
       model,
@@ -1686,73 +1999,32 @@ export function apply(ctx, pluginConfig = {}) {
       state: 'sent',
       code: null,
       settledAt: null,
-    };
-    router.runtime.pendingConfirm = null;
+    });
+    router.setPendingConfirm(sessionId, null);
   };
 
   ctx.effect(() =>
     ctx.on('agent/request', async (payload, next) => {
-      // 下游的 await next() 不能进 try：瀑布的 next() 只能消费一次，抛错之后再调一次
-      // 拿到的是 undefined，会把整轮请求的 provider/model 变成空的。真出异常就让
-      // prepareRequest 抛 —— agent-loop 会把它当成一个正常失败（UNKNOWN）吞掉。
+      // 瀑布的 next() 只能消费一次；先 await 再处理，异常直接抛给 prepareRequest。
       const cfg = await next();
-      // 会话隔离：游标按会话记。payload.agent 由 agentEvents() fused 注入，session.id 可用
-      const sessionId = payload?.agent?.session?.id ?? null;
       try {
-        const idx = router.resolveIndex(undefined, sessionId);
-        // p1Follow：-1 = P1 槽（会话模型，队列外）或"全熔断"降级 → 都放行原配置。
-        if (idx === -1 && config.p1Follow) {
-          lastProposal = { key: router.keyOf({ provider: cfg.provider, model: cfg.model }), idx: -1, overridden: false };
-          // P1 真实放行 = 用户所选会话模型的可靠采样点：更新快照（也按会话记一份）。
+        const sessionId = payload?.agent?.session?.id ?? null;
+        // 方案 B：**不在这里改 provider/model**（新宿主会拒绝）。
+        // selection 就是用户真正选的模型（P1），把它记成会话锚点与「上一轮实际使用」。
+        // 真正的故障转移由 llm/stream 中间件（runFallbackChain）在该请求的流上完成。
+        if (cfg && cfg.provider && cfg.model) {
           router.noteSessionModel(sessionId, cfg.provider, cfg.model);
+          noteRequest(-1, cfg.provider, cfg.model, sessionId);
           runtimePin(-1);
-          noteRequest(-1, cfg.provider, cfg.model, sessionId);
-          // UI 显示的是"实际在跑的这条"：P1 槽就是 -1
           router.setInFlight(sessionId, -1);
-          router.runtime.lastProposal = { ...lastProposal };
-          router.touch();
-          return cfg;
-        }
-        if (idx === -1) {
-          lastProposal = null; // 队列不生效：原配置即提案，交由下游
-          noteRequest(-1, cfg.provider, cfg.model, sessionId);
-          router.setInFlight(sessionId, -1);
-          router.runtime.lastProposal = null;
-          return cfg;
-        }
-        const route = config.queue[idx];
-        if (!route) {
           lastProposal = null;
-          noteRequest(-1, cfg.provider, cfg.model, sessionId);
-          router.setInFlight(sessionId, -1);
           router.runtime.lastProposal = null;
-          return cfg;
+          router.touch();
         }
-        lastProposal = { key: router.keyOf(route), idx, overridden: true };
-        noteRequest(idx, route.provider, route.model, sessionId);
-        router.setInFlight(sessionId, idx);
-        router.runtime.lastProposal = { ...lastProposal };
-        router.touch();
-        // 换路由就剥掉推理档位：目标模型不认上一台的档位时，宿主会在本地直接
-        // 拒绝（UNSUPPORTED_REASONING_EFFORT），请求一条都发不出去。详见
-        // withRouteOverride 的注释。
-        if (cfg.reasoningEffort !== undefined
-          && (cfg.provider !== route.provider || cfg.model !== route.model)) {
-          ctx.logger?.info?.(
-            '[fallback-queue] dropped reasoningEffort "%s" for route %s/%s (capability belongs to the previous model)',
-            cfg.reasoningEffort,
-            route.provider,
-            route.model,
-          );
-        }
-        return withRouteOverride(cfg, route);
       } catch (e) {
-        ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
-        lastProposal = null;
-        router.setInFlight(sessionId, -1);
-        router.runtime.lastProposal = null;
-        return cfg;
+        ctx.logger?.warn?.('[fallback-queue] agent/request observe failed: %s', e?.message);
       }
+      return cfg;
     }),
   );
 
@@ -1771,6 +2043,25 @@ export function apply(ctx, pluginConfig = {}) {
   ctx.effect(() =>
     ctx.on('agent/request-error', async (payload, next) => {
       const { provider, failure } = payload;
+      // 方案 B：真正的换路已在 llm/stream 中间件里把队列逐条试过一遍，每条路由的
+      // 成败也已在那一层记进电路。这里只落「上一轮实际使用」的失败证据，然后把是否
+      // 整轮重试交给下游（失败帧已带 providerRetryAfterMs，宿主不会放大成 5 次）。
+      if (config.enabled && (config.queue || []).length) {
+        try {
+          const sid = payload?.agent?.session?.id ?? null;
+          const lr = router.lastRequestFor(sid);
+          if (lr && lr.state === 'sent') {
+            router.setLastRequest(sid, {
+              ...lr,
+              state: 'fail',
+              code: typeof failure?.code === 'string' && failure.code ? failure.code : 'UNKNOWN',
+              settledAt: Date.now(),
+            });
+            router.touch();
+          }
+        } catch { /* ignore */ }
+        return next();
+      }
       // payload.agent 由 dsh-agent 的 agentEvents() fused 注入，运行时确实存在；
       // callConfig 不一定有（宿主没给），actualModel 是 agent/request 里记下的真实路由模型。
       const model = payload.agent?.callConfig?.model ?? lastProposal?.key?.split('\u0000')[1];
@@ -1811,14 +2102,14 @@ export function apply(ctx, pluginConfig = {}) {
         const sessionId = payload?.agent?.session?.id ?? null;
         // 先给「最近的请求证据」落一下结果：面板上那句「上一轮实际使用」说的就是它。
         // 这一条比任何探测都硬——真实对话请求失败了，就是这条路由当时不可用。
-        const lr = router.runtime.lastRequest;
+        const lr = router.lastRequestFor(sessionId);
         if (lr && lr.state === 'sent') {
-          router.runtime.lastRequest = {
+          router.setLastRequest(sessionId, {
             ...lr,
             state: 'fail',
             code: typeof failure?.code === 'string' && failure.code ? failure.code : 'UNKNOWN',
             settledAt: Date.now(),
-          };
+          });
         }
         const switched = router.onFailedAttempt(provider, model, failure?.code, p1OwnsFailure, failure, sessionId);
         // 诊断日志：判定结果。switched=false 时同时打出熔断态，便于看清是"全熔断"
@@ -1862,9 +2153,9 @@ export function apply(ctx, pluginConfig = {}) {
         if (route) router.recordSuccess(route);
         // 同一轮请求跑通了：把「最近的请求证据」标成 ok，面板据此显示
         // 「上一轮实际使用：P3 · 成功 · 12s 前」——这是切换生效的实证。
-        const lr = router.runtime.lastRequest;
+        const lr = router.lastRequestFor((payload?.agent?.session?.id) ?? null);
         if (lr && lr.state === 'sent') {
-          router.runtime.lastRequest = { ...lr, state: 'ok', settledAt: Date.now() };
+          router.setLastRequest((payload?.agent?.session?.id) ?? null, { ...lr, state: 'ok', settledAt: Date.now() });
           router.touch();
         }
       } catch {
@@ -1872,6 +2163,277 @@ export function apply(ctx, pluginConfig = {}) {
       }
     }),
   );
+
+  // ---- 方案 A：虚拟 provider（LLM 层故障转移）----
+  // 注册 provider=fallback / model=auto，由 FallbackQueueAdapter 顺序尝试真实路由。
+  // 只在「还没吐出可见 chunk」时换路：一旦有内容流出，会话历史已包含它，换路会
+  // 产生前后矛盾的半截回答，所以必须停在那条路由上。
+  /**
+   * 构造「按顺序尝试」的真实路由链：会话模型（P1）优先，其次队列（纯物理序）；
+   * 去重、排除自身。方案A：队列物理顺序就是尝试顺序，没有隐藏的 pinned 参与。
+   */
+  function buildFallbackChain(sessionId) {
+    const queue = config.queue || [];
+    const list = [];
+    const seen = new Set();
+    const push = (r) => {
+      if (!r || !r.provider || !r.model) return;
+      const k = `${r.provider}\u0000${r.model}`;
+      if (seen.has(k)) return;
+      seen.add(k);
+      list.push({ provider: r.provider, model: r.model });
+    };
+    // 环位置：p1Follow 下 P1 槽是 -1，其余是队列下标；静态模式下就是 0..n-1。
+    const p1Pos = config.p1Follow ? -1 : 0;
+    const ring = config.p1Follow ? [-1, ...queue.map((_, i) => i)] : queue.map((_, i) => i);
+    const routeAt = (pos) => (pos === -1 ? router.sessionModelFor(sessionId) : queue[pos]);
+    // 会话隔离的手动切换：本会话若有手动目标，就从那条开始按环序尝试（真正生效，
+    // 而不只是改显示）。否则默认从 P1 槽（p1Follow）或队列头（静态）起步。
+    const manual = router.manualFor(sessionId);
+    let startPos = p1Pos;
+    if (Number.isInteger(manual) && (manual === -1 || queue[manual])) startPos = manual;
+    const startAt = ring.indexOf(startPos);
+    const order = startAt >= 0 ? [...ring.slice(startAt), ...ring.slice(0, startAt)] : ring;
+    for (const pos of order) push(routeAt(pos));
+    // 兜底：非 p1Follow 且链意外为空时，用会话模型补一条（不该发生）。
+    if (list.length === 0) push(router.sessionModelFor(sessionId));
+    return list;
+  }
+
+  /**
+   * 过滤掉熔断中的路由，并显式告诉调用方「是不是全军覆没」。
+   *
+   * 旧实现在全熔断时直接返回**原链**，本意是"让用户看到真实错误而不是空响应"，
+   * 代价是每条消息都把整条链重打一遍：
+   *  - 用户实测：发一条「你好」，面板从 2 个可用瞬间变成全红；
+   *  - 更糟的是每条路由的 openedAt 都被刷新，60s 冷却永远滑不到头，
+   *    等于"越失败越锁死"。
+   * 所以这里返回 { chain, melted }，由 runFallbackChain 决定"全熔断只试一条"。
+   *
+   * @param {Array<{provider:string, model:string}>} chain
+   * @returns {{chain: Array, melted: boolean}}
+   */
+  function availableFallbackChain(chain) {
+    const now = Date.now();
+    const live = chain.filter((r) => router.isAvailable(r, now));
+    if (live.length) return { chain: live, melted: false };
+    return { chain: [], melted: chain.length > 0 };
+  }
+
+  /**
+   * 全熔断时的唯一候选：**冷却最早到期**的那条（最先可能恢复）。
+   *
+   * 为什么还要发一条而不是直接报错：熔断只是本地记账，路由本身可能早就好了；
+   * 发一条既能让用户看到上游的真实错误（而不是我们编的"全部熔断"），
+   * 又能给这条路由一次自然恢复的机会。选最早到期的，是因为它对"现在可能已经好了"
+   * 的置信度最高，而且只刷新这一条的冷却，其余几条照常倒计时。
+   */
+  function soonestRecoveringRoute(chain) {
+    let best = null;
+    let bestAt = Infinity;
+    for (const r of chain) {
+      const c = router.circuits.get(router.keyOf(r));
+      // 没有电路记录 = 从没失败过，理论上不会走到这里；给 0 让它排最前。
+      const at = c && c.state === CIRCUIT.OPEN ? (c.openedAt || 0) + config.cooldownMs : 0;
+      if (at < bestAt) {
+        bestAt = at;
+        best = r;
+      }
+    }
+    return best;
+  }
+
+  /** 子请求参数：换成真实路由，剥掉上一台模型的推理档位（换模型不继承档位）。 */
+  function subCallOptions(options, route) {
+    const o = { ...options, provider: route.provider, model: route.model };
+    delete o.reasoningEffort;
+    return o;
+  }
+
+  /**
+   * 给失败帧补上「多久之后再试」的提示（providerRetryAfterMs）。
+   *
+   * 上游只在**报文文本**里给恢复时刻（bili 闸门："holding outbound sends until
+   * 2026-11-08T06:15:51.683Z"），适配层不会把它翻译成 providerRetryAfterMs —— 于是
+   * 宿主 dsh-llm-retry 只能按本地 500ms 起步的指数退避重试 5 次，而每次重试都要
+   * 把整条 fallback 链重新扫一遍：一次用户消息 = 链长 × 6 次 429。
+   *
+   * 把恢复时刻换算成 providerRetryAfterMs 交给宿主，dsh-llm-retry 的 normal 策略
+   * 会因 `providerRetryAfterMs > maxDelayMs` 直接放弃这次重试，放大链条当场断掉。
+   * 上游本来就给了更准的信息，没有理由不用。
+   *
+   * @param {object} chunk 失败终态帧
+   * @returns {object} 原帧，或补了 providerRetryAfterMs 的副本（不改原对象）
+   */
+  function withRetryHint(chunk) {
+    const failure = chunk?.reason?.failure;
+    if (!failure || typeof failure !== 'object') return chunk;
+    // 适配层已经给出等待时长时尊重它，不覆盖
+    if (Number.isFinite(failure.providerRetryAfterMs) && failure.providerRetryAfterMs > 0) return chunk;
+    const resetAt = parseResetAt(failure.message);
+    if (!resetAt) return chunk;
+    const waitMs = resetAt - Date.now();
+    if (!(waitMs > 0)) return chunk;
+    return { ...chunk, reason: { ...chunk.reason, failure: { ...failure, providerRetryAfterMs: waitMs } } };
+  }
+
+  // 内部子请求的 options 对象集合：llm/stream 监听器看到它们直接放行，避免递归包裹。
+  const internalStreamOptions = new WeakSet();
+
+  async function* runFallbackChain(options) {
+    const sessionId = options?.sessionId ?? null;
+    const full = buildFallbackChain(sessionId);
+    // 插件关闭时不应继续故障转移：只走第一条（P1 会话模型），把行为交还给正常路径。
+    // 全熔断时也只试一条（冷却最早到期的）——见 availableFallbackChain 的注释：
+    // 旧行为是"整链再打一遍"，用户看到的就是"发一条消息，2 个可用变全红"。
+    let chain;
+    let allMelted = false;
+    if (config.enabled) {
+      const picked = availableFallbackChain(full);
+      chain = picked.chain;
+      allMelted = picked.melted;
+      if (allMelted) {
+        const one = soonestRecoveringRoute(full);
+        chain = one ? [one] : [];
+      }
+    } else {
+      chain = full.slice(0, 1);
+    }
+    if (chain.length === 0) {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: '故障转移队列为空：没有可尝试的路由' } } };
+      return;
+    }
+    // 全熔断时的单发候选不是"可用路由"，面板要如实标成"仍在冷却里试一发"，
+    // 否则用户会以为插件又偷偷把整条链扫了一遍。
+    if (allMelted) {
+      ctx.logger?.info?.('[fallback-queue] all routes tripped; trying only %s/%s (cooldown)', chain[0].provider, chain[0].model);
+    }
+    let lastFailure = null;
+    let lastError = null;
+    for (const route of chain) {
+      if (options?.signal?.aborted) {
+        yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: '请求已取消' } } };
+        return;
+      }
+      // 面板「上一轮实际使用」要显示真正接管的这条真实路由，而不是虚拟的 fallback/auto。
+      const routeKey = router.keyOf(route);
+      const sm = router.sessionModelFor(sessionId);
+      const routeIdx = sm && sm.provider === route.provider && sm.model === route.model
+        ? -1
+        : (config.queue || []).findIndex((r) => router.keyOf(r) === routeKey);
+      const markRequest = (state, code) => {
+        router.setLastRequest(sessionId, {
+          index: routeIdx,
+          provider: route.provider,
+          model: route.model,
+          session: sessionId,
+          at: Date.now(),
+          state,
+          code: code ?? null,
+          settledAt: state === 'sent' ? null : Date.now(),
+        });
+        router.setPendingConfirm(sessionId, null);
+        router.touch();
+      };
+      markRequest('sent');
+      let sub;
+      try {
+        const subOpts = subCallOptions(options, route);
+        internalStreamOptions.add(subOpts);
+        sub = llm.stream(subOpts);
+      } catch (e) {
+        lastError = e;
+        router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, null, e?.status);
+        markRequest('fail', e?.code || 'UNKNOWN');
+        continue;
+      }
+      let yieldedVisible = false;
+      let finished = false;
+      try {
+        for await (const chunk of sub) {
+          const isFinish = chunk?.type === 'finish';
+          const kind = chunk?.reason?.kind;
+          const failedFinish = isFinish && (kind === 'error' || kind === 'aborted');
+          if (!yieldedVisible && failedFinish) {
+            // 补上「多久之后再试」：上游把恢复时刻写在报文里，宿主读不到就只能按
+            // 本地退避重试 5 次，每次重试又把整链重新扫一遍（放大链长 × 6 倍）。
+            lastFailure = withRetryHint(chunk);
+            const f = lastFailure.reason?.failure || {};
+            router.recordFailure(route, f.code || 'UNKNOWN', f.message, f.providerRetryAfterMs, f.status);
+            markRequest('fail', f.code || 'UNKNOWN');
+            break; // 还没出内容 → 换下一条
+          }
+          if (!isFinish && chunk?.type && chunk.type !== 'usage') yieldedVisible = true;
+          yield chunk;
+          if (isFinish) {
+            finished = true;
+            if (!failedFinish) { router.recordSuccess(route); markRequest('ok'); }
+            return;
+          }
+        }
+      } catch (e) {
+        // 防御：adapterStream 本应把 adapter 异常转成 finish，但这里再兜一层。
+        lastError = e;
+        router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, null, e?.status);
+        markRequest('fail', e?.code || 'UNKNOWN');
+        if (yieldedVisible) {
+          // 已吐过可见内容：不能换路（半截回答），但必须把错误终态交给下游，不能悄悄结束。
+          yield withRetryHint({
+            type: 'finish',
+            reason: { kind: 'error', failure: { code: e?.code || 'UNKNOWN', message: e?.message || '流中途失败' } },
+          });
+          finished = true;
+          return;
+        }
+      } finally {
+        if (!finished && typeof sub?.interrupt === 'function') {
+          try { await sub.interrupt(); } catch { /* ignore */ }
+        }
+      }
+      if (yieldedVisible) {
+        // 已吐内容后子流正常结束却没有 finish：补一个 stop 终态，避免下游挂起。
+        router.recordSuccess(route);
+        markRequest('ok');
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        return;
+      }
+    }
+    if (lastFailure) {
+      yield lastFailure;
+      return;
+    }
+    yield {
+      type: 'finish',
+      reason: {
+        kind: options?.signal?.aborted ? 'aborted' : 'error',
+        failure: { code: lastError?.code || 'UNKNOWN', message: lastError?.message || '队列全部路由均不可用' },
+      },
+    };
+  }
+
+  // ---- 方案 B：llm/stream 中间件 ----
+  // 对「带 sessionId 的 agent 步骤请求」做故障转移：保持 selection 不变（用户选的
+  // 真实模型 = P1），但把这条请求的 chunk 流换成「先 P1、失败再按队列物理序」的包装。
+  // 探测 / 内部子请求没有 sessionId（或已被 internalStreamOptions 标记）→ 直接 next()。
+  ctx.effect(() => ctx.on('llm/stream', (options, next) => {
+    try {
+      if (!config.enabled) return next();
+      if (!(config.queue && config.queue.length)) return next();
+      if (!options || typeof options !== 'object') return next();
+      if (internalStreamOptions.has(options)) return next(); // 我们自己发起的子请求，别再包
+      const sessionId = options.sessionId;
+      if (typeof sessionId !== 'string') return next(); // 只拦 agent 步骤（带 sessionId）
+      // 兜底：正常 agent/request 已把 P1 写进会话锚点；万一没写，用本请求的
+      // provider/model 补一次（它就是用户此刻选的模型），否则 P1 槽会从链里丢掉。
+      if (!router.sessionModelFor(sessionId) && options.provider && options.model) {
+        router.noteSessionModel(sessionId, options.provider, options.model);
+      }
+      return runFallbackChain(options);
+    } catch (e) {
+      ctx.logger?.warn?.('[fallback-queue] llm/stream wrap failed: %s', e?.message);
+      return next();
+    }
+  }), 'fallback-queue llm/stream middleware');
 
   // ---- 启动加载设置 ----
   ctx.effect(() => {
@@ -1922,4 +2484,5 @@ export const Config = s.object({
   // 探测请求的 maxTokens。太小会被一部分网关按 400 拒绝（"max_tokens must be >= N"），
   // 于是「能正常对话的模型」长期显示探测失败——默认 8 是为了让探测请求本身合法。
   pingMaxTokens: s.number().default(DEFAULT_CONFIG.pingMaxTokens).description('探测请求的 maxTokens（默认 8；过小会被部分网关 400 拒绝）').volatile(),
+  probeConcurrency: s.number().default(DEFAULT_CONFIG.probeConcurrency).description('「探测全部」并发数（默认 4；越大越快但更易触发网关限流）').volatile(),
 });

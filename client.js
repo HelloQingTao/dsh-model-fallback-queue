@@ -36,6 +36,13 @@ window.__ModuleLoader__.load({
         stateProbing: '探测中',
         stateTripped: '熔断',
         stateInvalid: '配置失效',
+        // 探测通过、但仍在熔断冷却里：红色会误导成"彻底不能用"，这里是可操作的出口
+        stateRevivable: '可恢复',
+        healthRevivableHint: '探测已通过 · {age} 后自动放行，点「恢复」立即启用',
+        reviveAction: '恢复',
+        reviveTitle: '探测已通过，立即放出这条路由（下一条真实请求验证）',
+        flashRevived: '已放出 {label}，下一条请求会验证它',
+        flashReviveFailed: '恢复 {label} 失败：没有「熔断后探测成功」的证据',
         // 错误码释义：机器码是 key（不进表），这里只放释义文案
         hintQuota: '额度或频率受限',
         hintAccountQuota: '账号额度用尽',
@@ -82,18 +89,17 @@ window.__ModuleLoader__.load({
         queueTitle: '队列（P1 → Pn）',
         queueEmpty: '队列为空：添加 P2/P3… 作为 P1（当前会话模型）的后备',
         failuresSuffix: ' · 失败{n}',
-        alreadyTop: '已经是最高优先级',
-        moveUp: '上移',
-        alreadyBottom: '已经是最低优先级',
-        moveDown: '下移',
         confirmRemove: '确认移除？',
         remove: '移除',
         cancel: '取消',
         addModel: '+ 添加模型',
         failbackStrategy: 'P1 恢复策略',
-        lastSwitchLabel: '最近切换：{from} → {to}{code}',
         aboutDesc: '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。',
-        legend: '🟢 可用（有新鲜证据） · 🟡 风险（探测失败/偏慢） · 🔴 熔断 · ⚪ 未验证（没测过或证据过期）',
+        legend: '可用 · 风险（探测失败/偏慢） · 熔断 · 未测（还没检测过）',
+        legendOk: '可用',
+        legendWarn: '风险（探测失败/偏慢）',
+        legendError: '熔断',
+        legendMuted: '未测（还没检测过）',
         aboutInfoHint: 'ⓘ 悬浮可看到探测耗时、多久前测过、失败原因（模型返回的原文）与预计恢复时间',
         // 输入框芯片
         currentTag: '当前',
@@ -102,6 +108,7 @@ window.__ModuleLoader__.load({
         failoverTitle: '模型故障转移',
         badgeDisabled: '已关闭',
         badgeAllTripped: '全部熔断',
+        badgeTrippedRevivable: '全部熔断 · 可恢复',
         badgeCurrent: '当前 {label}',
         badgeSwitchedAway: '{label} 已失效，已切走',
         noteNotQueued: '本轮请求未经过队列（放行原配置）',
@@ -126,30 +133,34 @@ window.__ModuleLoader__.load({
         hostConfirmed: '宿主确认本轮实际使用：{name} · {ago}前',
         hostNotConfirmed: '本轮还没有宿主确认（发一条消息后这里会变成实证）',
         p1PickModel: '点击更换当前会话模型（即 P1）',
-        switchBtn: '切换',
-        switchThisRow: '立即把生效路由切到这一条（不用等它故障）',
-        switchCurrent: '已经在用这一条',
         settings: '设置…',
         slotLabel: '故障转移',
         // 仅用于识别宿主内置「选择模型」按钮（DOM 匹配，不参与渲染）
         selectModelAria: '选择模型',
-        // F2 大保底 / F3 免费付费 / F4 探测 —— 双语键
-        pinLast: '设为最后兜底（大保底）',
-        unpin: '取消大保底',
-        pinnedTag: '大保底',
+        // F3 免费付费标记 / F5 拖动排序 / F4 探测 —— 双语键
         paidFree: '免费',
         paidPaid: '付费',
         paidUnknown: '未标注',
-        // 轮转顺序 unknown → free → paid → unknown；title 一律写「点击后」的结果，
-        // 不写当前态（旧实现的 title 与点击效果恰好相反，是个误导）。
-        paidNextFree: '点击后：标为免费',
-        paidNextPaid: '点击后：标为付费',
-        paidNextUnknown: '点击后：清除标记',
-        paidCycle: '点击切换免费/付费标注（轮转：未标注→免费→付费→未标注）',
+        // 轮转顺序 unknown → free → paid → unknown；title 一律写「点击后」的结果。
+        paidNextFree: '点击设为免费',
+        paidNextPaid: '点击设为付费',
+        paidNextUnknown: '点击清除标注',
+        paidCycle: '点击切换标注：未标注 → 免费 → 付费',
+        paidHint: '免费/付费只是给你自己看的备注，不参与排序、不影响故障转移、也不自动判断；点胶囊本身即可切换。',
+        dragHandle: '按住拖动可调整顺序',
         probeAll: '探测全部',
         probingAll: '探测中… {done}/{total}',
-        probeAllDone: '探测完成：{ok} 可用 / {fail} 不可用',
-        probeAllDoneSkipped: '探测完成：{ok} 可用 / {fail} 不可用 / {skipped} 跳过',
+        // 统计口径必须带上「总条数」并说明含 P1：队列里只显示 P2..Pn，但探测会把
+        // P1（当前会话模型，不在队列行里）一起探。旧文案只说「X 可用 / Y 不可用」，
+        // 用户数了队列 4 条、看到 3+2=5 会以为算错了（实测质疑）。
+        probeAllDone: '探测完成：共 {total} 条 · {ok} 可用 / {fail} 不可用{p1}',
+        probeAllDoneSkipped: '探测完成：共 {total} 条 · {ok} 可用 / {fail} 不可用 / {skipped} 跳过{p1}',
+        // 「能回话，但被熔断锁着」单独计数：否则汇总说"2 可用"、面板却两行黄/红，对不上。
+        probeAllRevivable: '{n} 条可用但仍在冷却，点行内「恢复」立即启用',
+        probeP1Note: '（含 P1 当前模型）',
+        probeRowProbing: '探测中',
+        probeRowDone: '探测完成',
+        probeRowBusy: '探测中（已跳过）',
         probeAllFailed: '探测没有进行：{reason}',
         probeBusy: '上一轮探测还没结束，稍等再点',
         probeNoLlm: '宿主没有提供 llm 服务，插件无法发探测请求',
@@ -159,20 +170,11 @@ window.__ModuleLoader__.load({
         pickerTierHeader: '厂商：{name}',
         pickerNoneSelected: '请先勾选至少一个模型',
         probeSection: '周期健康探测',
-        pingInterval: '间隔（毫秒，0=关闭；默认 0 = 不开启，填 60000 即每 60 秒一轮）',
-        pingSkipPaid: '周期探测跳过付费模型（省配额；默认开启 = 只探免费模型）',
-        pingMaxTokens: '探测请求 maxTokens（默认 8；部分网关会拒绝过小的值，改大更保险）',
-        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens 见上，默认 8），可能产生少量调用；默认不开启，需要前瞻健康视图时再填上面的间隔',
-        // 「用真实请求验证」：探测体再调也是刻意精简的请求，网关按形状挑剔时它测不出来；
-        // 这一项直接发一条和真实对话同形的请求，代价是花 token，所以只手动触发。
-        verifyReal: '验证',
-        verifyRealTitle: '用一条真实请求验证这条路由（会消耗少量 token）',
-        verifyRealBusy: '上一条验证还没结束，稍等再点',
-        verifyRealOk: '✓ {pos} 真实请求通过 · {ms}ms{out}',
-        verifyRealOkOut: ' · 输出 {n} token',
-        verifyRealFail: '✕ {pos} 真实请求失败 · {code}',
-        verifyRealRejected: '✕ {pos} 真实请求被拒（{code}）：{msg}',
-        queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
+        probeAdvanced: '高级：周期健康探测',
+        pingInterval: '间隔（毫秒，0=关闭；60000=每分钟）',
+        pingSkipPaid: '跳过付费模型（省配额）',
+        pingMaxTokens: '探测 maxTokens（默认 8，过小部分网关会拒）',
+        pingCostWarn: '⚠ 会发送真实请求、产生少量调用',
         // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
         healthOk: '可用',
@@ -218,6 +220,14 @@ window.__ModuleLoader__.load({
         stateProbing: 'Probing',
         stateTripped: 'Tripped',
         stateInvalid: 'Invalid config',
+        // Probe passed but the circuit is still cooling down: red reads as "dead";
+        // this is the actionable middle state.
+        stateRevivable: 'Recoverable',
+        healthRevivableHint: 'Probe passed · auto-release in {age}, click "Revive" to enable now',
+        reviveAction: 'Revive',
+        reviveTitle: 'Probe passed — release this route now (next real request verifies it)',
+        flashRevived: '{label} released — the next request will verify it',
+        flashReviveFailed: 'Could not revive {label}: no "probe passed after trip" evidence',
         hintQuota: 'Rate or quota limited',
         hintAccountQuota: 'Quota exhausted',
         hintRateLimit: 'Rate limited',
@@ -260,18 +270,17 @@ window.__ModuleLoader__.load({
         queueTitle: 'Queue (P1 → Pn)',
         queueEmpty: 'Queue is empty: add P2/P3… as fallbacks for P1 (the current session model)',
         failuresSuffix: ' · {n} failures',
-        alreadyTop: 'Already the highest priority',
-        moveUp: 'Move up',
-        alreadyBottom: 'Already the lowest priority',
-        moveDown: 'Move down',
         confirmRemove: 'Remove this route?',
         remove: 'Remove',
         cancel: 'Cancel',
         addModel: '+ Add model',
         failbackStrategy: 'P1 recovery strategy',
-        lastSwitchLabel: 'Last switch: {from} → {to}{code}',
         aboutDesc: 'When a model in the queue fails (rate limited, quota exhausted, unavailable), the session automatically continues on the next available model. P1 is always the current session model; entries added to the queue are fallbacks (P2, P3…).',
-        legend: '🟢 Usable (fresh evidence) · 🟡 Risk (probe failed/slow) · 🔴 Tripped · ⚪ Unverified (never probed or stale)',
+        legend: 'Usable · Risk (probe failed/slow) · Tripped · Untested (not probed yet)',
+        legendOk: 'Usable',
+        legendWarn: 'Risk (probe failed/slow)',
+        legendError: 'Tripped',
+        legendMuted: 'Untested (not probed yet)',
         aboutInfoHint: 'ⓘ Hover for probe latency, how long ago it was checked, the failure reason (raw model output) and the estimated recovery time',
         currentTag: 'Current',
         sessionModelUnknown: 'Current session model',
@@ -279,6 +288,7 @@ window.__ModuleLoader__.load({
         failoverTitle: 'Model failover',
         badgeDisabled: 'Disabled',
         badgeAllTripped: 'All tripped',
+        badgeTrippedRevivable: 'All tripped · recoverable',
         badgeCurrent: 'Current {label}',
         badgeSwitchedAway: '{label} failed, switched away',
         noteNotQueued: 'This request did not go through the queue (original config passed through)',
@@ -302,28 +312,29 @@ window.__ModuleLoader__.load({
         hostConfirmed: 'Host confirmed this turn ran on: {name} · {ago} ago',
         hostNotConfirmed: 'No host confirmation yet — send one message and this turns into evidence',
         p1PickModel: 'Click to change the session model (P1)',
-        switchBtn: 'Switch',
-        switchThisRow: 'Make this route active right now (no need to wait for a failure)',
-        switchCurrent: 'Already in use',
         settings: 'Settings…',
         slotLabel: 'Failover',
         selectModelAria: 'Select model',
-        // F2 大保底 / F3 免费付费 / F4 探测 —— 双语键
-        pinLast: 'Pin as last-resort (safety net)',
-        unpin: 'Unpin (not last-resort)',
-        pinnedTag: 'Safety net',
+        // F3 free/paid badge / F5 drag-to-reorder / F4 probe — bilingual keys
         paidFree: 'Free',
         paidPaid: 'Paid',
         paidUnknown: 'Unmarked',
-        // Titles describe the CLICK RESULT, not the current state (the old mapping was inverted).
-        paidNextFree: 'Click: mark as free',
-        paidNextPaid: 'Click: mark as paid',
-        paidNextUnknown: 'Click: clear mark',
-        paidCycle: 'Click to cycle free/paid (unmarked→free→paid→unmarked)',
+        // Titles describe the CLICK RESULT, not the current state.
+        paidNextFree: 'Click to set free',
+        paidNextPaid: 'Click to set paid',
+        paidNextUnknown: 'Click to clear',
+        paidCycle: 'Click to cycle label: unmarked → free → paid',
+        paidHint: 'Free/paid is just a note for you — it does not affect ordering, failover, or auto-detection. Click the badge itself to cycle it.',
+        dragHandle: 'Drag to reorder',
         probeAll: 'Probe all',
         probingAll: 'Probing… {done}/{total}',
-        probeAllDone: 'Probe done: {ok} ok / {fail} unavailable',
-        probeAllDoneSkipped: 'Probe done: {ok} ok / {fail} unavailable / {skipped} skipped',
+        probeAllDone: 'Probe done: {total} total · {ok} ok / {fail} unavailable{p1}',
+        probeAllDoneSkipped: 'Probe done: {total} total · {ok} ok / {fail} unavailable / {skipped} skipped{p1}',
+        probeAllRevivable: '{n} reachable but still cooling down — click "Revive" on the row',
+        probeP1Note: ' (incl. P1 session model)',
+        probeRowProbing: 'Probing',
+        probeRowDone: 'Probe done',
+        probeRowBusy: 'Probing (skipped)',
         probeAllFailed: 'Probe did not run: {reason}',
         probeBusy: 'previous probe still running, retry in a moment',
         probeNoLlm: 'the host exposes no llm service, so probes cannot be sent',
@@ -333,18 +344,11 @@ window.__ModuleLoader__.load({
         pickerTierHeader: 'Vendor: {name}',
         pickerNoneSelected: 'Check at least one model first',
         probeSection: 'Periodic health probe',
-        pingInterval: 'Interval (ms, 0 = off; default 0 = disabled, enter 60000 for once a minute)',
-        pingSkipPaid: 'Skip paid models in periodic probes (saves quota; on by default = free models only)',
-        pingMaxTokens: 'Probe request maxTokens (default 8; some gateways reject very small values)',
+        probeAdvanced: 'Advanced: periodic health probe',
+        pingInterval: 'Interval (ms, 0 = off; 60000 = every minute)',
+        pingSkipPaid: 'Skip paid models (saves quota)',
+        pingMaxTokens: 'Probe maxTokens (default 8; too small may be rejected)',
         pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens per above, default 8) and may consume a little quota; it stays off until you set an interval above',
-        verifyReal: 'Verify',
-        verifyRealTitle: 'Verify this route with one real request (costs a few tokens)',
-        verifyRealBusy: 'a previous verification is still running, retry in a moment',
-        verifyRealOk: '✓ {pos} real request ok · {ms}ms{out}',
-        verifyRealOkOut: ' · {n} output tokens',
-        verifyRealFail: '✕ {pos} real request failed · {code}',
-        verifyRealRejected: '✕ {pos} real request rejected ({code}): {msg}',
-        queueRowHint: '📌 = last-resort · colour = health (price is text only)',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
         healthProbeFailed: 'Probe failed',
@@ -579,7 +583,7 @@ window.__ModuleLoader__.load({
           ),
           h(
             'div',
-            { style: { overflowY: 'auto', padding: '6px 8px' } },
+            { style: { overflowY: 'auto', overflowX: 'hidden', padding: '6px 8px' } },
             err
               ? h('div', { style: { padding: 12, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, t('catalogLoadFailed', { err }))
               : !groups
@@ -596,6 +600,7 @@ window.__ModuleLoader__.load({
                             onClick: () => setOpenProvider(openProvider === g.id ? null : g.id),
                             style: {
                               width: '100%', textAlign: 'left', padding: '8px 10px',
+                              boxSizing: 'border-box',
                               background: 'transparent', border: 'none', color: 'inherit',
                               cursor: 'pointer', fontSize: 13, fontWeight: 600,
                               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -620,6 +625,9 @@ window.__ModuleLoader__.load({
                                     style: {
                                       // 已入队的行整行禁用（防重复），勾选态置灰不可取消
                                       display: 'flex', alignItems: 'center', gap: 8,
+                                      // boxSizing:'border-box' 很关键：宽度 100% + 左右 padding，
+                                      // 不加它每行会比容器宽出 ~28px → 列表里横向溢出 → 漏出横向滚动条。
+                                      boxSizing: 'border-box',
                                       width: '100%', textAlign: 'left', padding: '7px 14px 7px 14px',
                                       cursor: inQueue ? 'not-allowed' : 'pointer', fontSize: 13, borderRadius: 6,
                                       opacity: inQueue ? 0.45 : 1,
@@ -634,7 +642,7 @@ window.__ModuleLoader__.load({
                                     onChange: () => { if (!inQueue) toggle(g.id, m.id); },
                                     style: { flex: 'none' },
                                   }),
-                                  h('span', { style: { flex: 1 } }, (m.name || m.id) + (inQueue ? t('added') : '')),
+                                  h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (m.name || m.id) + (inQueue ? t('added') : '')),
                                 );
                               }),
                             )
@@ -794,24 +802,44 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 免费/付费标记（价格，与健康无关）。
-     * 原先用绿/琥珀着色，结果和健康色撞车：一条付费路由永远显示琥珀色，
-     * 用户看到的"黄"其实只是"要花钱"，却被读成"这条模型有问题"。
-     * 现在价格只做中性文字标签，颜色通道完全留给健康状态。
+     * 免费/付费 小标记（价格，与健康无关）——像输入框里的 chip 那样的小胶囊。
+     * 始终渲染（含「未标注」），这样每行都有稳定的「标记」按钮，用户在
+     * 未标注→免费→付费→未标注 之间循环切换。
+     * 刻意保持**中性色**（label-secondary）：绿色/琥珀色是健康状态的专属色通道，
+     * 价格若复用会把"付费"误读成"这条模型有问题"（历史教训）。价格差异靠文字区分。
+     * @param {'free'|'paid'|'unknown'} paid
+     * @returns {object}
      */
-    function paidTag(paid) {
-      const neutral = {
+    function paidBadge(paid, onClick, title) {
+      const v = paid === 'free' || paid === 'paid' ? paid : 'unknown';
+      const label = v === 'free' ? t('paidFree') : v === 'paid' ? t('paidPaid') : t('paidUnknown');
+      const c = 'var(--dsw-alias-label-secondary, #888)';
+      const base = {
         fontSize: 10,
-        color: 'var(--dsw-alias-label-secondary, #888)',
-        border: '1px solid color-mix(in srgb, var(--dsw-alias-label-secondary, #888) 40%, transparent)',
-        borderRadius: 4,
-        padding: '0 4px',
         lineHeight: '14px',
+        padding: '0 4px',
+        borderRadius: 4,
         flex: 'none',
+        color: c,
+        border: '1px solid color-mix(in srgb, ' + c + ' 40%, transparent)',
       };
-      if (paid === 'free') return h('span', { style: neutral }, t('paidFree'));
-      if (paid === 'paid') return h('span', { style: neutral }, t('paidPaid'));
-      return null;
+      // 标准功能就做在 chip 本身上：有 onClick 时整块 chip 可点，点一次在
+      // 未标注 → 免费 → 付费 → 未标注 之间切换；没有 onClick（如只读面板）就是纯展示。
+      if (!onClick) return h('span', { style: base }, label);
+      // 注意：不要用 font 简写属性（inherit）——它会把 base 里的 fontSize(10)/lineHeight(14)
+      // 一并重置成父级继承值，胶囊立刻变成大字号（踩过的坑）。只继承字体族/字重。
+      return h('button', {
+        onClick,
+        title: title || t('paidCycle'),
+        'aria-label': title || t('paidCycle'),
+        style: {
+          ...base,
+          fontFamily: 'inherit',
+          fontWeight: 'inherit',
+          background: 'transparent',
+          cursor: 'pointer',
+        },
+      }, label);
     }
 
     /** 把毫秒数折成 "12s" / "8m" / "3h" 这种短标签。 */
@@ -842,6 +870,17 @@ window.__ModuleLoader__.load({
       if (e.invalid) return { tone: 'error', text: t('stateInvalid'), detail: '', short: '' };
       if (e.state === 'open') {
         const left = e.recoverAt ? Math.max(0, e.recoverAt - now) : 0;
+        // 探测通过、但仍锁在冷却里：这时画纯红是误导——它其实已经能回话，只是本地
+        // 熔断锁还没到期。改画黄 + 「可恢复」，行内「恢复」按钮才是可操作的出口。
+        // （旧实现只有红色，于是"探测 2 个可用"与"全红"同屏，用户只能怀疑插件坏了。）
+        if (e.revivable) {
+          return {
+            tone: 'warn',
+            text: t('stateRevivable'),
+            detail: t('healthRevivableHint', { age: fmtAge(left) }),
+            short: e.recoverAt ? fmtAge(left) : '',
+          };
+        }
         return {
           tone: 'error',
           text: t('stateTripped'),
@@ -914,18 +953,8 @@ window.__ModuleLoader__.load({
           short: resetShort || t('healthAgo', { age: fmtAge(age) }),
         };
       }
-      // 探测周期开着时，超过 3 个周期（至少 3 分钟）没有新证据就降级成灰色：
-      // 60s 周期下绿色最多"保鲜"3 分钟，探测停摆不会被永远当成健康。
-      const interval = Number(snap?.pingIntervalMs) || 0;
-      const staleAfter = interval > 0 ? Math.max(interval * 3, 180_000) : HEALTH_STALE_MS;
-      if (age > staleAfter) {
-        return {
-          tone: 'muted',
-          text: t('healthStale'),
-          detail: t('healthAgo', { age: fmtAge(age) }),
-          short: t('healthAgo', { age: fmtAge(age) }),
-        };
-      }
+      // 用户要求：不要「证据过期」这种降级。只要没有新一轮检测或状态更新，
+      // 就一直显示上次的结果（绿/黄都保留），新鲜度用「多久以前」提示即可。
       const parts = [];
       if (probedAt && e.probeLatencyMs) parts.push(t('healthProbeMs', { ms: e.probeLatencyMs }));
       parts.push(t('healthAgo', { age: fmtAge(age) }));
@@ -940,25 +969,135 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 健康徽章：健康色只出现在这里，队列行与面板行共用。
-     * 主标签只放状态词（+ 一个很短的"多久以前"），完整证据进悬浮提示。
+     * 各 tone 对应的状态点配色（用户嫌 emoji 圆点「好复古」——emoji 渲染出来是带高光的
+     * 3D 小圆球，很旧。改成现代设计系统（Linear/Vercel 那类）的标准做法：**纯色扁平小圆点**，
+     * 8px、无渐变无高光、取宿主静态色板的 500 号主色，和宿主自己的语义色同一套）。
+     */
+    const HEALTH_DOT = {
+      ok: 'var(--dsw-static-green-500, #22c55e)',
+      warn: 'var(--dsw-static-amber-500, #f59e0b)',
+      error: 'var(--dsw-static-red-500, #ef4444)',
+      muted: 'var(--dsw-static-neutral-300, #d4d4d4)',
+    };
+
+    /**
+     * 图例项：一个和队列行同款的扁平小圆点 + 状态词。
+     * 颜色与 healthBadge 共用 HEALTH_DOT，保证图例和真身颜色一致。
+     */
+    function legendItem(tone, labelKey) {
+      return h(
+        'span',
+        { style: { display: 'inline-flex', alignItems: 'center', marginRight: 10, whiteSpace: 'nowrap' } },
+        h('span', {
+          style: {
+            flex: 'none',
+            display: 'inline-block',
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            marginRight: 5,
+            background: HEALTH_DOT[tone] || HEALTH_DOT.muted,
+          },
+        }),
+        t(labelKey),
+      );
+    }
+
+    /**
+     * 健康徽章：一个扁平的实心小圆点（纯色、无高光），颜色=tone；
+     * 完整状态词与证据放在悬浮提示里。队列行与面板行共用。——用户要在窄行里给模型名让出空间。
      */
     function healthBadge(e, snap, now) {
       if (!e) return null;
       const hs = healthOf(e, snap, now);
       if (!hs.text) return null;
-      // 软熔断计数（连续失败 n/阈值）不上主标签，但别丢：进悬浮提示，
-      // 否则"为什么还没熔断"只能去翻日志。
+      // 软熔断计数（连续失败 n/阈值）不上主标签，但别丢：进悬浮提示。
       const failures = Number(e.failures) > 0 ? t('failuresSuffix', { n: e.failures }) : '';
-      const tip = [hs.detail, failures].filter(Boolean).join(' · ') || hs.text;
+      // 悬浮提示 = 状态词（如「额度用尽」）+ 证据（多久以前 / 延迟 / 错误码）+ 失败计数
+      const tip = [hs.text, hs.detail, failures].filter(Boolean).join(' · ');
+      const tone = hs.tone in HEALTH_DOT ? hs.tone : 'muted';
       return h(
         'span',
-        { title: tip, style: { flex: 'none', display: 'inline-flex', alignItems: 'baseline', gap: 4 } },
-        h(Badge, { tone: hs.tone }, hs.text),
-        hs.short
-          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary, #888)' } }, hs.short)
-          : null,
+        {
+          title: tip,
+          'aria-label': tip,
+          style: {
+            flex: 'none',
+            cursor: 'help',
+            display: 'block',
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: HEALTH_DOT[tone],
+          },
+        },
       );
+    }
+
+    /**
+     * 探测进行/完成的逐条小徽章：一条很轻的胶囊，出现在模型名后。
+     * - state='probing'：蓝色描边 + 「探测中」，带一个转圈的提示（dots 动画用 CSS keyframes 会在
+     *   反复重渲染时抖动，这里用简洁的静态描边，重点在"字在、色在"）。
+     * - state='done' ok=true ：「探测完成」淡绿；ok=false ：「探测完成·不可用」淡红；
+     *   ok=null（本轮被跳过）：「探测中（已跳过）」灰。
+     * 用户要的是"点了探测全部，每条开始探测的加一个探测中，完成后显示探测完成，过会消失"。
+     * 后端 probeStatus 有 TTL，到点自动从快照里消失，前端这里自然不再渲染。
+     */
+    function probeBadge(status) {
+      if (!status || !status.state) return null;
+      const probing = status.state === 'probing';
+      const failed = status.state === 'done' && status.ok === false;
+      const busy = status.state === 'done' && status.ok === null;
+      const label = probing
+        ? t('probeRowProbing')
+        : busy ? t('probeRowBusy') : t('probeRowDone');
+      const tone = probing
+        ? { fg: 'var(--dsw-alias-brand-primary, #4f7cf7)', bg: 'transparent', bd: 'var(--dsw-alias-brand-primary, #4f7cf7)' }
+        : failed
+          ? { fg: 'var(--dsw-alias-state-error-primary, #c94141)', bg: 'color-mix(in srgb, var(--dsw-alias-state-error-primary, #c94141) 10%, transparent)', bd: 'transparent' }
+          : busy
+            ? { fg: 'var(--dsw-alias-label-secondary)', bg: 'color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent)', bd: 'transparent' }
+            : { fg: 'var(--dsw-static-green-600, #16a34a)', bg: 'color-mix(in srgb, var(--dsw-static-green-500, #22c55e) 14%, transparent)', bd: 'transparent' };
+      return h(
+        'span',
+        {
+          style: {
+            flex: 'none',
+            fontSize: 10,
+            lineHeight: '14px',
+            padding: '0 5px',
+            borderRadius: 4,
+            border: `1px solid ${tone.bd}`,
+            background: tone.bg,
+            color: tone.fg,
+            whiteSpace: 'nowrap',
+          },
+        },
+        label,
+      );
+    }
+
+    /**
+     * 「探测全部」结果汇总文案。results 里除了队列各条，还可能有 P1 槽
+     * （p1Follow 下 = 当前会话模型，index=-1，不在队列行里展示）。
+     * 所以必须按实际条数 total 报，并在含 P1 时点明「含 P1 当前模型」，
+     * 否则用户会对不上队列行数（实测：队列 4 条却看到 3+2=5）。
+     * @param {Array} results 后端 pingAll 返回的 results
+     * @returns {string}
+     */
+    function probeSummary(results) {
+      const list = Array.isArray(results) ? results : [];
+      const ok = list.filter((x) => x.ok === true).length;
+      const fail = list.filter((x) => x.ok === false).length;
+      const skipped = list.filter((x) => x.skipped === true).length;
+      const hasP1 = list.some((x) => x.index === -1);
+      const p1 = hasP1 ? t('probeP1Note') : '';
+      const total = list.length;
+      // 「可用但被熔断锁着」必须单独说：行内是黄的「可恢复」，汇总只写"2 可用"的话
+      // 两边对不上，又绕回"为什么可用还是红的"。
+      const revivable = list.filter((x) => x.revivable === true).length;
+      const base = t(skipped ? 'probeAllDoneSkipped' : 'probeAllDone', { total, ok, fail, skipped, p1 });
+      return revivable ? `${base} · ${t('probeAllRevivable', { n: revivable })}` : base;
     }
 
     /**
@@ -970,9 +1109,14 @@ window.__ModuleLoader__.load({
      * @param {number} now 当前时刻（算"多久以前"）
      * @returns {{text:string, color:string}}
      */
-    function requestLineText(snap, now) {
-      const lr = snap?.lastRequest;
-      const pc = snap?.pendingConfirm;
+    function requestLineText(snap, now, sessionId) {
+      // 会话隔离：优先本会话的证据（sessionLastRequest/sessionPendingConfirm），
+      // 无则回退全局镜像（探测/旧快照/无会话上下文的场景）。
+      const sid = typeof sessionId === 'string' && sessionId ? sessionId : null;
+      const scopedLR = sid ? snap?.sessionLastRequest?.[sid] : null;
+      const scopedPC = sid ? snap?.sessionPendingConfirm?.[sid] : null;
+      const lr = scopedLR || snap?.lastRequest;
+      const pc = scopedPC || snap?.pendingConfirm;
       const pcNewer = Boolean(pc) && (!lr || pc.at >= lr.at);
       const label = (i) => (i < 0 ? 'P1' : (snap?.p1Follow ? `P${i + 2}` : `P${i + 1}`));
       const muted = 'var(--dsw-alias-label-secondary)';
@@ -990,15 +1134,6 @@ window.__ModuleLoader__.load({
       return { text: t('reqNone'), color: muted };
     }
 
-    /**
-     * 大保底标记（F2）：📌 + 文案 tag；仅 pinned 渲染。
-     * @param {boolean|undefined} pinned
-     * @returns {object|null}
-     */
-    function pinnedTagEl(pinned) {
-      if (pinned !== true) return null;
-      return h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', border: '1px solid #4f7cf755', borderRadius: 4, padding: '0 4px', lineHeight: '14px', flex: 'none' } }, `📌 ${t('pinnedTag')}`);
-    }
 
     /** 队列行的 paid 值（缺省归 'unknown'）。 */
     function qValPaid(row) {
@@ -1016,9 +1151,6 @@ window.__ModuleLoader__.load({
       // F4 探测全部：进行中 + 结果提示
       const [probing, setProbing] = React.useState(false);
       const [probeNote, setProbeNote] = React.useState(null);
-      // 「用真实请求验证」：正在验证的行索引（null = 空闲）与该行的回执文案
-      const [verifying, setVerifying] = React.useState(null);
-      const [verifyNote, setVerifyNote] = React.useState(null);
       // 相对时间刷新器：设置页不轮询快照，不 tick 的话"12s前"会冻住不更新。
       const [, setClockTick] = React.useState(0);
       React.useEffect(() => {
@@ -1029,6 +1161,11 @@ window.__ModuleLoader__.load({
       const [pingDraft, setPingDraft] = React.useState(null);
       // 探测体 maxTokens 的本地草稿（同样的理由：每敲一下就落盘会把输入顶回旧值）
       const [pingTokensDraft, setPingTokensDraft] = React.useState(null);
+      // 周期探测（高级）：默认折叠，把设置项藏起来、让主界面更简洁；后端能力完整保留。
+      const [showProbeAdv, setShowProbeAdv] = React.useState(false);
+      // F5 拖动排序状态：dragFrom = 正在拖的行下标，dragOver = 当前悬停的目标行下标。
+      const [dragFrom, setDragFrom] = React.useState(null);
+      const [dragOver, setDragOver] = React.useState(null);
 
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
@@ -1045,6 +1182,21 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         refresh();
       }, [refresh]);
+
+      // 探测进行中（或「探测完成」还没淡出）时，设置页需要跟着轮询快照，
+      // 否则逐条「探测中 → 探测完成 → 消失」根本不会动（页面平时只在操作后刷新一次）。
+      const probeLive = probing || snap?.probingAll === true
+        || Boolean(snap?.probeStatus && Object.keys(snap.probeStatus).length > 0);
+      React.useEffect(() => {
+        if (!probeLive) return undefined;
+        const id = setInterval(async () => {
+          try {
+            const st = await host.getRuntimeSnapshot();
+            if (st) setSnap(st);
+          } catch { /* 忽略：下一拍再试 */ }
+        }, 700);
+        return () => clearInterval(id);
+      }, [probeLive, host]);
 
       if (!cfg) return h('div', { style: { padding: 16 } }, t('loading'));
 
@@ -1089,11 +1241,13 @@ window.__ModuleLoader__.load({
         setBusy(false);
       };
 
-      const move = async (i, dir) => {
+      // F5 拖动排序：把 from 行移动到 to 行（HTML5 拖放）。移动后落盘，物理顺序即刻
+      // 就是新的尝试顺序（队列采用纯物理序，没有隐藏的 pinned 参与）。
+      const reorder = async (from, to) => {
+        if (from === to || from < 0 || to < 0 || from >= cfg.queue.length || to >= cfg.queue.length) return;
         const q = [...cfg.queue];
-        const j = i + dir;
-        if (j < 0 || j >= q.length) return;
-        [q[i], q[j]] = [q[j], q[i]];
+        const [item] = q.splice(from, 1);
+        q.splice(to, 0, item);
         await writeQueue(q);
       };
 
@@ -1105,26 +1259,8 @@ window.__ModuleLoader__.load({
         setPickerOpen(true);
       };
 
-      // F2/F3 行内写回：改 pinned / paid 然后落 state 文件。
+      // F3 行内写回：改 paid 然后落 state 文件。
       // paid 在 unknown→free→paid→unknown 之间轮转，一遍就够（三态小循环）。
-      const pinRow = async (i, pinned) => {
-        const q = [...cfg.queue];
-        q[i] = { ...q[i], pinned };
-        await writeQueue(q);
-      };
-      // 点选切换：把生效路由立刻拉到这一条（队列下标 i；-1=P1 槽由芯片面板负责）
-      // 结果必须可见：失败不能静默（"切了但不知道成不成"正是设置页的老问题）。
-      const switchRow = async (i) => {
-        setBusy(true);
-        const r = await host.manualFailback(i);
-        const ok = r ? (r.ok === undefined ? true : Boolean(r.ok)) : false;
-        const st = await host.getRuntimeSnapshot();
-        if (st) setSnap(st);
-        const name = cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`;
-        if (!ok) setErr(t('flashSwitchFailed', { label: name }));
-        else setErr(null);
-        setBusy(false);
-      };
       const cyclePaid = async (i) => {
         const order = ['unknown', 'free', 'paid'];
         const cur = qValPaid(cfg.queue[i]);
@@ -1138,14 +1274,11 @@ window.__ModuleLoader__.load({
         setProbing(true);
         setProbeNote(null);
         setErr(null);
-        const r = await host.pingAll();
+        const r = await host.pingQueue();
         await refresh();
         setProbing(false);
         if (r?.ok && Array.isArray(r.results)) {
-          const ok = r.results.filter((x) => x.ok === true).length;
-          const fail = r.results.filter((x) => x.ok === false).length;
-          const skipped = r.results.filter((x) => x.skipped === true).length;
-          setProbeNote(t(skipped ? 'probeAllDoneSkipped' : 'probeAllDone', { ok, fail, skipped }));
+          setProbeNote(probeSummary(r.results));
           return;
         }
         // 探测没跑成必须说出来。旧实现只在 r.ok 时写提示，失败/返回 null 时
@@ -1153,47 +1286,6 @@ window.__ModuleLoader__.load({
         // 而实际上（必修 1 的参数不匹配）每次点击都被网关拒绝了。
         const reason = r?.reason || 'unknown';
         setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
-      };
-
-      /**
-       * 「用真实请求验证」某一条（S1）：发一条和真实对话同形的请求，而不是微型探测体。
-       * 为什么单独一个按钮：探测体再怎么调都是刻意精简的请求，网关按形状挑剔时它测不出
-       * 真相；只有真实请求才算证据。代价是真的花 token，所以只手动点，不进周期扫描。
-       */
-      const verifyRow = async (i) => {
-        if (verifying !== null) {
-          setVerifyNote(t('verifyRealBusy'));
-          return;
-        }
-        const pos = cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`;
-        setVerifying(i);
-        setVerifyNote(null);
-        setErr(null);
-        try {
-          const r = await host.probeReal(i);
-          await refresh(); // 证据字段（lastOkAt/probeOk…）会变，徽章要跟着重画
-          // r.ok 只表示"验证跑完了"，路由行不行看 r.receipt.ok——两者不能混。
-          if (!r?.ok) {
-            const reason = r?.reason || 'unknown';
-            setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
-            return;
-          }
-          const rc = r.receipt || {};
-          if (rc.ok) {
-            const outN = rc.usage?.outputTokens ?? rc.usage?.output_tokens ?? rc.usage?.completion_tokens;
-            const out = Number.isFinite(Number(outN))
-              ? t('verifyRealOkOut', { n: Number(outN) })
-              : '';
-            setVerifyNote(t('verifyRealOk', { pos, ms: rc.latencyMs ?? '?', out }));
-          } else if (rc.rejected) {
-            const msg = String(rc.message || '').slice(0, 120);
-            setVerifyNote(t('verifyRealRejected', { pos, code: rc.code || 'UNKNOWN', msg }));
-          } else {
-            setVerifyNote(t('verifyRealFail', { pos, code: rc.code || 'UNKNOWN' }));
-          }
-        } finally {
-          setVerifying(null);
-        }
       };
 
       const modes = [
@@ -1235,7 +1327,21 @@ window.__ModuleLoader__.load({
         h(
           'div',
           null,
-          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('queueTitle')),
+          // 标题行：左侧标题 + 右侧「探测全部」按钮（同一行，省掉下方独立按钮行）
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 } },
+            h('div', { style: { fontWeight: 600 } }, t('queueTitle')),
+            h('button', {
+              onClick: probeAll,
+              disabled: probing || !cfg.enabled || !cfg.queue.length,
+              title: t('probeAll'),
+              style: probing || !cfg.enabled || !cfg.queue.length ? btnSmallDisabled : btnSmall,
+            },
+              probing
+                ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
+                : t('probeAll')),
+          ),
           h(
             'div',
             { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
@@ -1243,108 +1349,64 @@ window.__ModuleLoader__.load({
               ? h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('queueEmpty'))
               : cfg.queue.map((r, i) => {
                   const entry = snap?.entries?.[i];
+                  const rowKey = `${r.provider}/${r.model}`;
+                  const dragging = dragFrom === i;
+                  const dropTarget = dragOver === i && dragFrom !== null && dragFrom !== i;
                   return h(
                     'div',
                     {
-                      // key 不能带索引：上移/下移后 index 变化会让 React 卸载重建整行，
+                      // key 不能带索引：拖动/删除后 index 变化会让 React 卸载重建整行，
                       // 重建那一帧背景是空的，深色模式下就是一次白闪。用 provider/model 做稳定标识。
-                      key: `${r.provider}/${r.model}`,
+                      key: rowKey,
+                      // F5：整行可拖（HTML5 DnD）。拖动手柄只是视觉提示，拖哪都行。
+                      draggable: true,
+                      onDragStart: (e) => {
+                        setDragFrom(i);
+                        try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', rowKey); } catch { /* 老浏览器忽略 */ }
+                      },
+                      onDragOver: (e) => { e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch { /* noop */ } if (dragOver !== i) setDragOver(i); },
+                      onDrop: (e) => {
+                        e.preventDefault();
+                        const from = dragFrom;
+                        setDragFrom(null);
+                        setDragOver(null);
+                        if (from !== null && from !== i) void reorder(from, i);
+                      },
+                      onDragEnd: () => { setDragFrom(null); setDragOver(null); },
                       style: {
                         display: 'flex',
                         alignItems: 'center',
                         gap: 8,
                         padding: '6px 10px',
                         borderRadius: 8,
-                        border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+                        border: dropTarget
+                          ? '1px dashed var(--dsw-alias-brand-primary, #4f7cf7)'
+                          : '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+                        opacity: dragging ? 0.5 : 1,
+                        cursor: 'grab',
                       },
                     },
-                    h('strong', { style: { width: 28 } }, cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`),
-                    h('span', { style: { flex: 1, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
-                      h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${r.provider} / ${r.model}`),
-                      // F2 大保底标记
-                      pinnedTagEl(r.pinned === true),
-                      // 价格不再单独画一个标签：右边的轮转按钮本身写着 免费/付费/未标注，
-                      // 同一行里出现两次同样的东西只是把行撑宽。
+                    // 拖动手柄（视觉暗示，整行其实都能拖）
+                    h('span', { title: t('dragHandle'), 'aria-label': t('dragHandle'), style: { flex: 'none', cursor: 'grab', opacity: 0.5, fontSize: 13, lineHeight: 1, userSelect: 'none' } }, '⠿'),
+                    h('strong', { style: { width: 22, flex: 'none' } }, cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`),
+                    h('span', { style: { flex: 1, fontSize: 13, display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 } },
+                      // 模型名是主体：优先占宽、尽量完整显示；provider 作为次要小字跟在后面，空间不足时先压它。
+                      h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: `${r.provider} / ${r.model}` }, r.model),
+                      h('span', { style: { flex: '0 1 auto', minWidth: 0, maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--dsw-alias-label-secondary, #888)' }, title: r.provider }, r.provider),
                     ),
                     entry
                       ? healthBadge(entry, snap, Date.now())
                       : null,
+                    probeBadge(snap?.probeStatus?.[`${r.provider}\u0000${r.model}`]),
                     circuitInfoIcon(entry, snap),
-                    // 点选切换：立刻把生效路由拉到这一条（不用等它故障）。
-                    // 芯片面板（输入框旁的 P 按钮）行点击走同一语义，这里给设置页一个显式入口，
-                    // 免得用户以为设置页的队列只能配置、不能切换。
-                    h(
-                      'button',
-                      {
-                        onClick: () => { void switchRow(i); },
-                        disabled: !cfg.enabled || (snap?.effectiveIndex ?? snap?.activeIndex) === i,
-                        title: (snap?.effectiveIndex ?? snap?.activeIndex) === i ? t('switchCurrent') : t('switchThisRow'),
-                        'aria-label': t('switchThisRow'),
-                        style: !cfg.enabled || (snap?.effectiveIndex ?? snap?.activeIndex) === i ? btnSmallDisabled : btnSmall,
-                      },
-                      t('switchBtn'),
-                    ),
-                    // S1：用真实请求验证这一条。探测体是刻意精简的请求，遇到按形状挑剔的
-                    // 网关时"探测失败"不能证明模型不可用；这个按钮发一条真正常规请求。
-                    h(
-                      'button',
-                      {
-                        onClick: () => { void verifyRow(i); },
-                        disabled: verifying !== null,
-                        title: verifying === i ? t('verifyRealBusy') : t('verifyRealTitle'),
-                        'aria-label': t('verifyReal'),
-                        style: verifying !== null ? btnSmallDisabled : btnSmall,
-                      },
-                      verifying === i ? '…' : t('verifyReal'),
-                    ),
-                    // F2：大保底 PIN 开关
-                    h(
-                      'button',
-                      {
-                        onClick: () => pinRow(i, !(r.pinned === true)),
-                        title: r.pinned === true ? t('unpin') : t('pinLast'),
-                        'aria-label': r.pinned === true ? t('unpin') : t('pinLast'),
-                        style: r.pinned === true ? { ...btnSmall, borderColor: 'var(--dsw-alias-brand-primary, #4f7cf7)', color: 'var(--dsw-alias-brand-primary, #4f7cf7)' } : btnSmall,
-                      },
-                      '📌',
-                    ),
-                    // F3：免费/付费轮转
-                    h(
-                      'button',
-                      {
-                        onClick: () => cyclePaid(i),
-                        // title 必须写"点击后会发生什么"，不是"当前是什么"。
-                        // 旧实现拿当前态去取键：free 行显示「标为免费」（点下去却变成付费）、
-                        // unknown 行显示「清除标记」（点下去其实是标成免费）——恰好全反。
-                        title: qValPaid(r) === 'unknown'
-                          ? t('paidNextFree')
-                          : qValPaid(r) === 'free' ? t('paidNextPaid') : t('paidNextUnknown'),
-                        'aria-label': t('paidCycle'),
-                        style: btnSmall,
-                      },
-                      r.paid === 'free' ? t('paidFree') : r.paid === 'paid' ? t('paidPaid') : t('paidUnknown'),
-                    ),
-                    h(
-                      'button',
-                      {
-                        onClick: () => move(i, -1),
-                        disabled: i === 0,
-                        title: i === 0 ? t('alreadyTop') : t('moveUp'),
-                        'aria-label': t('moveUp'),
-                        style: i === 0 ? btnSmallDisabled : btnSmall,
-                      },
-                      '↑',
-                    ),
-                    h(
-                      'button',
-                      {
-                        onClick: () => move(i, 1),
-                        disabled: i === cfg.queue.length - 1,
-                        title: i === cfg.queue.length - 1 ? t('alreadyBottom') : t('moveDown'),
-                        'aria-label': t('moveDown'),
-                        style: i === cfg.queue.length - 1 ? btnSmallDisabled : btnSmall,
-                      },
-                      '↓',
+                    // F3：免费/付费 小标记（像输入框 chip）——点 chip 本身即可切换
+                    // title 写"点击后会发生什么"，不是"当前是什么"。
+                    paidBadge(
+                      qValPaid(r),
+                      () => cyclePaid(i),
+                      qValPaid(r) === 'unknown'
+                        ? t('paidNextFree')
+                        : qValPaid(r) === 'free' ? t('paidNextPaid') : t('paidNextUnknown'),
                     ),
                     confirmRemove === i
                       ? h('span', { style: { display: 'flex', gap: 4, alignItems: 'center' } },
@@ -1352,43 +1414,18 @@ window.__ModuleLoader__.load({
                           h('button', { onClick: () => { setConfirmRemove(null); remove(i); }, style: { ...btnSmall, color: 'var(--dsw-alias-state-error-primary, #c94141)' } }, t('remove')),
                           h('button', { onClick: () => setConfirmRemove(null), style: btnSmall }, t('cancel')),
                         )
-                      : h('button', { onClick: () => setConfirmRemove(i), style: btnSmall }, t('remove')),
+                      : h('button', { onClick: () => setConfirmRemove(i), style: { ...btnSmall, flex: 'none' } }, t('remove')),
                   );
                 }),
           ),
           h('button', { onClick: add, style: { ...btnSmall, marginTop: 8 } }, t('addModel')),
-          // F2/F3 行内标记说明 + F4 手动探测全部
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 } },
-            h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, t('queueRowHint')),
-            h('button', {
-              onClick: probeAll,
-              disabled: probing || !cfg.enabled || !cfg.queue.length,
-              title: t('probeAll'),
-              style: probing || !cfg.enabled || !cfg.queue.length ? btnSmallDisabled : btnSmall,
-            },
-              // 进度用快照里的真实 done/total（维护者建议 1：旧实现 done 恒为 0，
-              // 文案写着 n/N 却永远显示 0/N，等于撒谎）。快照还没到就退回 0/total。
-              probing
-                ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
-                : t('probeAll')),
-          ),
+          // 费用标注用途说明：它是给用户看的备注，不参与排序/故障转移/自动判定。
+          h('div', { style: { marginTop: 6, fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-secondary)' } }, t('paidHint')),
           (probeNote || snap?.probingAll)
             ? h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } },
                 snap?.probingAll
                   ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
                   : probeNote)
-            : null,
-          // 「用真实请求验证」的回执：通过/失败的结论必须落在屏幕上，不能只进展。
-          verifyNote
-            ? h('div', {
-                style: {
-                  fontSize: 11,
-                  marginTop: 2,
-                  color: verifyNote.startsWith('✓')
-                    ? 'var(--dsw-alias-state-success-primary, #2f8f4e)'
-                    : 'var(--dsw-alias-state-warn-primary, #c98a1b)',
-                },
-              }, verifyNote)
             : null,
           // 切换的真实性在面板里看（上一轮真实请求走了哪条），设置页不重复占位。
         ),
@@ -1430,12 +1467,20 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
-        // F4 周期健康探测（默认关，间隔 0；开启会有真实请求，给出成本警告）
+        // F4 周期健康探测：收进「高级」折叠区（默认收起），后端能力完整保留。
+        // 点标题才展开，主界面保持简洁。
         h(
           'div',
           null,
-          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('probeSection')),
-          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+          h('button', {
+            onClick: () => setShowProbeAdv((v) => !v),
+            style: {
+              display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+              background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+              color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 12, fontWeight: 600,
+            },
+          }, `${showProbeAdv ? '▾' : '▸'} ${t('probeAdvanced')}`),
+          !showProbeAdv ? null : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginLeft: 16, paddingLeft: 12, borderLeft: '2px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))' } },
             h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
               h('input', {
                 type: 'number',
@@ -1474,19 +1519,6 @@ window.__ModuleLoader__.load({
             h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-state-warn-primary, #c98a1b)' } }, t('pingCostWarn')),
           ),
         ),
-        // 运行态
-        snap?.lastSwitch && snap.lastSwitch.from !== snap.lastSwitch.to
-          ? h(
-              'div',
-              { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
-              // 位置 → 显示名：p1Follow 下 -1 = P1、队列下标 i = P{i+2}；静态模式 i = P{i+1}
-              t('lastSwitchLabel', {
-                from: snap.lastSwitch.from < 0 ? 'P1' : `P${snap.lastSwitch.from + (snap.p1Follow ? 2 : 1)}`,
-                to: snap.lastSwitch.to < 0 ? 'P1' : `P${snap.lastSwitch.to + (snap.p1Follow ? 2 : 1)}`,
-                code: snap.lastSwitch.code ? t('parenWrap', { text: snap.lastSwitch.code }) : '',
-              }),
-            )
-          : null,
         pickerOpen
           ? h(ModelPicker, {
               onClose: () => setPickerOpen(false),
@@ -1514,7 +1546,12 @@ window.__ModuleLoader__.load({
             },
           },
           h('div', null, t('aboutDesc')),
-          h('div', { style: { marginTop: 2 } }, t('legend')),
+          h('div', { style: { marginTop: 2, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '2px 0' } },
+            legendItem('ok', 'legendOk'),
+            legendItem('warn', 'legendWarn'),
+            legendItem('error', 'legendError'),
+            legendItem('muted', 'legendMuted'),
+          ),
           h('div', { style: { marginTop: 2 } }, t('aboutInfoHint')),
         ),
       );
@@ -1623,10 +1660,18 @@ window.__ModuleLoader__.load({
         && Number.isInteger(snap.sessionInFlight[props.sessionId])
         ? snap.sessionInFlight[props.sessionId]
         : undefined;
-      // 全局手动切换目标：manualFailback 会清空所有会话的 inFlight 记录，此时
-      // sessionInFlight 里没有本会话的条目——但那不是"没切换"，而是"切了、还没发请求"。
-      // 不认这个字段，芯片就会一直写 P1、目标行也不高亮（用户报的「切到 P4 没反应」）。
-      const manualTarget = Number.isInteger(snap?.manualIndex) ? snap.manualIndex : undefined;
+      // 手动切换目标：会话隔离后按本会话取（sessionManual），没有则回退全局镜像
+      // （旧宿主/无会话上下文）。绝不让别的会话的手动目标污染本会话显示。
+      const hasSessionManualMap = props.sessionId !== undefined
+        && snap?.sessionManual
+        && typeof snap.sessionManual === 'object';
+      const myManual = hasSessionManualMap
+        && Number.isInteger(snap.sessionManual[props.sessionId])
+        ? snap.sessionManual[props.sessionId]
+        : undefined;
+      const manualTarget = myManual !== undefined
+        ? myManual
+        : !hasSessionManualMap && Number.isInteger(snap?.manualIndex) ? snap.manualIndex : undefined;
       const inFlight = myInFlight !== undefined ? myInFlight
         : manualTarget !== undefined ? manualTarget
         : hasSessionMap ? -1
@@ -1678,7 +1723,7 @@ window.__ModuleLoader__.load({
           if (pullLabelRef.current) pullLabelRef.current();
           let st = null;
           try {
-            st = await host.getRuntimeSnapshot();
+            st = await host.getRuntimeSnapshot(props.sessionId);
           } catch (e) {
             console.warn('[fallback-queue] snapshot failed', e);
           }
@@ -1702,6 +1747,8 @@ window.__ModuleLoader__.load({
           const active = Boolean(st) && (
             st.lastRequest?.state === 'sent'
             || Boolean(st.pendingConfirm)
+            || st.probingAll === true
+            || Boolean(st.probeStatus && Object.keys(st.probeStatus).length > 0)
             || st.entries?.some((e) => e.state === 'half_open' || e.state === 'open')
           );
           const fast = (active && fastBudget > 0) || open;
@@ -1736,7 +1783,10 @@ window.__ModuleLoader__.load({
         };
       }, [open]);
       const p1Follow = snap?.p1Follow ?? true;
-      const allOpen = entries.length > 0 && entries.every((e) => e.state === 'open');
+      const allTripped = entries.length > 0 && entries.every((e) => e.state === 'open');
+      // 全熔断里只要有一条「探测已通过、只是冷却没到」，就不是死局：
+      // 芯片/面板整片报红正是用户「2 个可用瞬间变全红」的来源，别把可恢复也画成死路。
+      const anyRevivable = entries.some((e) => e.revivable === true);
       const halfOpen = entries.some((e) => e.state === 'half_open');
       // P1 的电路视图：新宿主下发 snap.p1（P1 = 会话模型，不在队列里，没有下标）；
       // 老宿主（p1Follow=false 或没这个字段）退回队列第一条。
@@ -1766,9 +1816,9 @@ window.__ModuleLoader__.load({
       if (!enabled) {
         label = 'P';
         tone = 'muted';
-      } else if (allOpen) {
+      } else if (allTripped) {
         label = 'P!';
-        tone = 'error';
+        tone = anyRevivable ? 'warn' : 'error';
       } else {
         label = lbl(effective);
         tone = effHealth.tone;
@@ -1793,8 +1843,9 @@ window.__ModuleLoader__.load({
       // 手动切换：把生效路由直接拉到指定位置（-1 = P1 槽，p1Follow 下即当前会话模型）。
       // 面板行点击走的就是这里；「手动回切」模式下这也是唯一的回去方式。
       const switchTo = async (idx) => {
-        const r = await host.manualFailback(idx);
-        const st = await host.getRuntimeSnapshot();
+        // 会话隔离：把当前会话 id 一并传给宿主，切换只在本会话生效。
+        const r = await host.manualFailback(idx, props.sessionId);
+        const st = await host.getRuntimeSnapshot(props.sessionId);
         if (st) setSnap(st);
         const name = lbl(idx);
         // manualFailback 的失败形态：返回 null（信封 ok:false）或裸值 {ok:false}
@@ -1831,6 +1882,46 @@ window.__ModuleLoader__.load({
           },
         };
       };
+      // 「恢复」：探测已经证明这条能回话，但熔断锁还锁着 → 用户点一下把它放出来。
+      // 只在 revivable 时出现：其它情况给按钮等于把熔断变成摆设。
+      const revive = async (idx, e) => {
+        const r = await host.reviveRoute(idx, props.sessionId);
+        const st = await host.getRuntimeSnapshot(props.sessionId);
+        if (st) setSnap(st);
+        const ok = r ? (r.ok === undefined ? true : Boolean(r.ok)) : false;
+        setFlash({
+          tone: ok ? 'ok' : 'error',
+          text: ok
+            ? t('flashRevived', { label: lbl(idx) })
+            : t('flashReviveFailed', { label: lbl(idx) }),
+        });
+        if (flashTimer.current) clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlash(null), ok ? 5000 : 6000);
+      };
+      const reviveButton = (e, idx) => (enabled && e?.revivable)
+        ? h(
+            'button',
+            {
+              // 行本身是"点击切换路由"，恢复按钮必须拦住冒泡，否则点恢复会顺手切过去。
+              onClick: (ev) => { ev.stopPropagation(); void revive(idx, e); },
+              onKeyDown: (ev) => { ev.stopPropagation(); },
+              title: t('reviveTitle'),
+              style: {
+                flex: 'none',
+                fontSize: 10,
+                lineHeight: '14px',
+                padding: '0 6px',
+                borderRadius: 4,
+                border: '1px solid var(--dsw-alias-state-warn-primary, #c98a1b)',
+                background: 'transparent',
+                color: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              },
+            },
+            t('reviveAction'),
+          )
+        : null;
 
       return h(
         'div',
@@ -1876,7 +1967,7 @@ window.__ModuleLoader__.load({
                   position: 'absolute',
                   bottom: 'calc(100% + 10px)',
                   right: 0,
-                  minWidth: 300,
+                  minWidth: 360,
                   borderRadius: 12,
                   border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
                   // 不用 #fff 兜底：token 拿不到时透明，让宿主背景透出来，
@@ -1906,53 +1997,17 @@ window.__ModuleLoader__.load({
                 t('failoverTitle'),
                 !enabled
                   ? h(Badge, { tone: 'muted' }, t('badgeDisabled'))
-                  : allOpen
-                    ? h(Badge, { tone: 'error' }, t('badgeAllTripped'))
+                  : allTripped
+                    ? h(Badge, { tone: anyRevivable ? 'warn' : 'error' },
+                        anyRevivable ? t('badgeTrippedRevivable') : t('badgeAllTripped'))
                     : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(effective) })),
               ),
-              // 切换动作反馈：只在"游标都没动"（点了不可用的行）时出现
-              flash
-                ? h(
-                    'div',
-                    {
-                      style: {
-                        padding: '7px 14px',
-                        fontSize: 12,
-                        fontWeight: 600,
-                        color: flash.tone === 'ok'
-                          ? 'var(--dsw-alias-state-success-primary, #3a9e5f)'
-                          : 'var(--dsw-alias-state-error-primary, #c94141)',
-                        borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 6,
-                      },
-                    },
-                    (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
-                  )
-                : null,
-              // 唯一的事实行：上一轮真实请求走了哪条、成没成。
-              // 没有图例、没有验证横幅、没有解释句子：面板空间留给路由本身。
-              (() => {
-                const line = requestLineText(snap, now);
-                return h(
-                  'div',
-                  {
-                    style: {
-                      padding: '6px 14px',
-                      fontSize: 11,
-                      lineHeight: '16px',
-                      color: line.color,
-                      borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                    },
-                  },
-                  line.text,
-                );
-              })(),
+              // 面板顶部不再放独立提示行：探测结果 / 切换失败都并到底部工具条左侧，
+              // 「上一轮真实请求」那行用户明确说没必要，已删除（面板空间留给路由本身）。
               // 队列条目
               h(
                 'div',
-                { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 } },
+                { style: { padding: '4px 8px', display: 'flex', flexDirection: 'column' } },
                 h('div', {
                     key: 'p1-row',
                     ...(enabled && !p1Active
@@ -1969,7 +2024,9 @@ window.__ModuleLoader__.load({
                           }
                         : {}),
                     style: {
-                      display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, fontSize: 12,
+                      display: 'flex', alignItems: 'center', gap: 10, padding: '4px 8px', borderRadius: 8, fontSize: 12,
+                      // 行间用一条极淡的分割线，比纯靠间距更清楚又不显眼。
+                      borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                       background: p1Active ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                       cursor: enabled && (p1Follow || !p1Active) ? 'pointer' : 'default',
                     },
@@ -1983,6 +2040,8 @@ window.__ModuleLoader__.load({
                   // 没有 P1 视图（还没发过消息、拿不到会话模型）时不能写"正常"：
                   // 那是在替一条从未验证过的路由打包票。
                   healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('healthUnprobed')),
+                  reviveButton(p1Entry, p1Follow ? -1 : 0),
+                  probeBadge(hostSessionModel ? snap?.probeStatus?.[`${hostSessionModel.provider}\u0000${hostSessionModel.model}`] : null),
                   circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0
@@ -1999,9 +2058,11 @@ window.__ModuleLoader__.load({
                             display: 'flex',
                             alignItems: 'center',
                             gap: 10,
-                            padding: '7px 8px',
+                            padding: '4px 8px',
                             borderRadius: 8,
                             fontSize: 12,
+                            // 行间极淡分割线（见 P1 行说明）
+                            borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
                             background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
                             cursor: enabled && !isActive ? 'pointer' : 'default',
                           },
@@ -2009,18 +2070,20 @@ window.__ModuleLoader__.load({
                         h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),
                         h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 } },
                           h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
-                          e.pinned === true ? h('span', { title: t('pinnedTag'), style: { flex: 'none' } }, '📌') : null,
-                          paidTag(e.paid),
+                          paidBadge(e.paid),
                         ),
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                           : null,
+                        probeBadge(snap?.probeStatus?.[`${e.provider}\u0000${e.model}`]),
                         healthBadge(e, snap, Date.now()),
+                        reviveButton(e, e.index),
                         circuitInfoIcon(e, snap),
                       );
                     })),
               ),
-              // 底部：最近切换 + 设置入口
+              // 底部工具条：左侧放探测结果/切换反馈（同一行、紧挨按钮左侧，不再单开一行），
+              // 无反馈时退回「最近切换」；右侧是切回 P1 / 探测全部 / 设置。
               h(
                 'div',
                 {
@@ -2030,17 +2093,44 @@ window.__ModuleLoader__.load({
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
+                    gap: 8,
                     fontSize: 11,
                     color: 'var(--dsw-alias-label-secondary)',
                   },
                 },
-                // from===to 是空操作（老宿主会记），不显示成"P2 → P2"
-                snap?.lastSwitch && snap.lastSwitch.from !== snap.lastSwitch.to
-                  ? t('recentSwitch', { from: lbl(snap.lastSwitch.from), to: lbl(snap.lastSwitch.to) })
-                  : t('noSwitchRecord'),
+                // 左槽：优先显示探测/切换反馈（就地反馈），否则显示最近切换。
+                flash
+                  ? h(
+                      'span',
+                      {
+                        style: {
+                          flex: '1 1 auto',
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          fontWeight: 600,
+                          color: flash.tone === 'ok'
+                            ? 'var(--dsw-alias-state-success-primary, #3a9e5f)'
+                            : 'var(--dsw-alias-state-error-primary, #c94141)',
+                        },
+                        title: (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
+                      },
+                      (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
+                    )
+                  : (() => {
+                      // from===to 是空操作（老宿主会记），不显示成"P2 → P2"
+                      // 会话隔离：优先本会话的最近切换（sessionLastSwitch），无则回退全局镜像。
+                      const sw = (props.sessionId && snap?.sessionLastSwitch?.[props.sessionId])
+                        || snap?.lastSwitch;
+                      return h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                        sw && sw.from !== sw.to
+                          ? t('recentSwitch', { from: lbl(sw.from), to: lbl(sw.to) })
+                          : t('noSwitchRecord'));
+                    })(),
                 h(
                   'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                  { style: { display: 'flex', alignItems: 'center', gap: 6, flex: 'none' } },
                   // 已经在 P1 就不给"切回 P1"按钮（-1/静态 0 都算在 P1）
                   enabled && !p1Active
                     ? h(
@@ -2074,19 +2164,19 @@ window.__ModuleLoader__.load({
                           // 但徽章色不变时用户无法区分"没反应"和"反应了但没变化"
                           // （用户实测：「有反应，但好像也没去测试，完全确定不了」）。
                           onClick: () => {
-                            void host.pingAll().then((r) => {
+                            void host.pingAll(props.sessionId).then(async (r) => {
                               if (r?.ok && Array.isArray(r.results)) {
-                                const okN = r.results.filter((x) => x.ok === true).length;
-                                const failN = r.results.filter((x) => x.ok === false).length;
-                                const skipN = r.results.filter((x) => x.skipped === true).length;
                                 setFlash({
                                   tone: 'ok',
-                                  text: t(skipN ? 'probeAllDoneSkipped' : 'probeAllDone', {
-                                    ok: okN, fail: failN, skipped: skipN,
-                                  }),
+                                  text: probeSummary(r.results),
                                 });
                                 if (flashTimer.current) clearTimeout(flashTimer.current);
                                 flashTimer.current = setTimeout(() => setFlash(null), 5000);
+                                // 立刻拉一次快照：探测会把「可恢复」证据写进电路，
+                                // 不刷新的话行颜色和「恢复」按钮要等下一拍轮询（最长 5s），
+                                // 看起来就像"探测完了但什么都没变"。
+                                const st = await host.getRuntimeSnapshot(props.sessionId);
+                                if (st) setSnap(st);
                                 return;
                               }
                               const reason = r?.reason || 'unknown';
@@ -2160,7 +2250,12 @@ window.__ModuleLoader__.load({
           namespace: 'dsh-model-fallback-queue',
           method: 'snapshot',
           invocation: { kind: 'direct' },
-          parameters: [],
+          // sessionId：P1 槽按调用方会话取（不传 = 无会话上下文，宿主退回全局镜像）。
+          // 参数表必须与实现/调用点**同时**有这一个可选实参：旧 bug 是声明成 1 个
+          // 而调用点传 0 个，网关按声明校验实参个数，每次调用都被拒。
+          parameters: [
+            { name: 'sessionId', wire: 'sessionId', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#SessionId') },
+          ],
           result: { mode: 'src-json' },
         },
         {
@@ -2178,7 +2273,10 @@ window.__ModuleLoader__.load({
           namespace: 'dsh-model-fallback-queue',
           method: 'manualFailback',
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'index', wire: 'index', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Index') }],
+          parameters: [
+            { name: 'index', wire: 'index', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Index') },
+            { name: 'sessionId', wire: 'sessionId', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#SessionId') },
+          ],
           result: { mode: 'src-json' },
         },
         {
@@ -2206,12 +2304,43 @@ window.__ModuleLoader__.load({
           namespace: 'dsh-model-fallback-queue',
           method: 'pingAll',
           invocation: { kind: 'direct' },
-          // ⚠️ 必须是空参数表。曾声明成 [{name:'opts',...}] 而三个调用点全都不传参，
-          // 网关按声明校验实参个数，于是每次点「探测全部」都被拒：
+          // ⚠️ 声明与实现、调用点三者必须同时是"一个可选实参"。曾声明成
+          // [{name:'opts',...}] 而三个调用点全都不传参，网关按声明校验实参个数，
+          // 于是每次点「探测全部」都被拒：
           //   client api: ...expected 1 argument(s), got 0
-          // 失败只进 console.warn，界面毫无动静 —— 用户以为"探测完成、一切正常"。
-          // 实现 async pingAll() 本来就不收参，声明与实现对齐即可。
-          parameters: [],
+          // 现在参数是 sessionId（P1 槽按发起方会话取），调用点一律显式传
+          // （无会话上下文时传 undefined），个数始终对齐。
+          parameters: [
+            { name: 'sessionId', wire: 'sessionId', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#SessionId') },
+          ],
+          result: { mode: 'src-json' },
+        },
+        // F4'：设置页探测全部（只探队列、排除 P1）。与 pingAll 拆成两个方法，
+        // 避免设置页与芯片面板共用同一 RPC 时口径互相污染。
+        // sessionId 形参与 pingAll 同签名（设置页没有会话上下文，传 undefined 即可）。
+        {
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/pingQueue',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'pingQueue',
+          invocation: { kind: 'direct' },
+          parameters: [
+            { name: 'sessionId', wire: 'sessionId', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#SessionId') },
+          ],
+          result: { mode: 'src-json' },
+        },
+        // 「立即恢复」：探测已通过、却仍锁在熔断冷却里的路由 → 降为半开放出来。
+        // 由面板行内的「恢复」按钮触发；安全性由后端 reviveRoute 校验证据。
+        {
+          id: 'dsh-model-fallback-queue#dsh-model-fallback-queue/reviveRoute',
+          service: 'FallbackQueueService',
+          namespace: 'dsh-model-fallback-queue',
+          method: 'reviveRoute',
+          invocation: { kind: 'direct' },
+          parameters: [
+            { name: 'index', wire: 'index', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#Index') },
+            { name: 'sessionId', wire: 'sessionId', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#SessionId') },
+          ],
           result: { mode: 'src-json' },
         },
       ],
@@ -2322,11 +2451,13 @@ window.__ModuleLoader__.load({
               return { ok: false, error: e?.message || String(e) };
             }
           },
-          async getRuntimeSnapshot() {
+          async getRuntimeSnapshot(sessionId) {
             try {
               const remote = rpcFace;
               if (!remote?.snapshot) return null;
-              const r = await remote.snapshot();
+              // 会话隔离：P1 槽按调用方会话取（面板/芯片都传自己的 sessionId）。
+              // 不传 = 无会话上下文（设置页），宿主退回全局镜像。
+              const r = await remote.snapshot(typeof sessionId === 'string' && sessionId ? sessionId : undefined);
               // typert face 可能返回 {ok,value} 信封或裸值，两种都兼容
               if (r && typeof r === 'object' && 'ok' in r) return r.ok ? (r.value ?? null) : null;
               return r ?? null;
@@ -2347,9 +2478,9 @@ window.__ModuleLoader__.load({
               return null;
             }
           },
-          async manualFailback(index) {
+          async manualFailback(index, sessionId) {
             try {
-              const r = await rpcFace?.manualFailback?.(index);
+              const r = await rpcFace?.manualFailback?.(index, sessionId);
               return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] manualFailback failed', e);
@@ -2357,23 +2488,43 @@ window.__ModuleLoader__.load({
             }
           },
           // F4：探测全部（手动按钮优先，skipPaid=false 全探测；周期扫描由 host 端计时器驱动）
-          async pingAll() {
+          async pingAll(sessionId) {
             try {
-              const r = await rpcFace?.pingAll?.();
+              const r = await rpcFace?.pingAll?.(typeof sessionId === 'string' && sessionId ? sessionId : undefined);
               return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] pingAll failed', e);
               return null;
             }
           },
+          // 设置页「探测全部」：只探队列、排除 P1 槽
+          async pingQueue(sessionId) {
+            try {
+              const r = await rpcFace?.pingQueue?.(typeof sessionId === 'string' && sessionId ? sessionId : undefined);
+              return unwrapEnvelope(r);
+            } catch (e) {
+              console.warn('[fallback-queue] pingQueue failed', e);
+              return null;
+            }
+          },
           // S1：用真实请求验证某一条（index=-1 为 P1 槽）。返回 {ok, route, receipt}，
           // 其中 ok 只表示"验证跑完了"，路由好坏看 receipt.ok。
-          async probeReal(index) {
+          async probeReal(index, sessionId) {
             try {
-              const r = await rpcFace?.probeReal?.(index);
+              const r = await rpcFace?.probeReal?.(index, typeof sessionId === 'string' && sessionId ? sessionId : undefined);
               return unwrapEnvelope(r);
             } catch (e) {
               console.warn('[fallback-queue] probeReal failed', e);
+              return null;
+            }
+          },
+          // 「立即恢复」：探测已通过、但仍锁在熔断里的路由 → 降为半开，下一条真实请求验证。
+          async reviveRoute(index, sessionId) {
+            try {
+              const r = await rpcFace?.reviveRoute?.(index, typeof sessionId === 'string' && sessionId ? sessionId : undefined);
+              return unwrapEnvelope(r);
+            } catch (e) {
+              console.warn('[fallback-queue] reviveRoute failed', e);
               return null;
             }
           },
