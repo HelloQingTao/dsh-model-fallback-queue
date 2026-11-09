@@ -1116,13 +1116,23 @@ window.__ModuleLoader__.load({
      * @returns {{text:string, color:string}}
      */
     function requestLineText(snap, now, sessionId) {
-      // 会话隔离：优先本会话的证据（sessionLastRequest/sessionPendingConfirm），
-      // 无则回退全局镜像（探测/旧快照/无会话上下文的场景）。
+      // 会话隔离：优先本会话的证据（sessionLastRequest/sessionPendingConfirm）。
+      // 新会话隔离修复（2026-11-09）：有 sessionId 且宿主下发了 per-session 映射时，
+      // 本会话未命中 = 本会话还没发过请求 → 显示 reqNone，绝不回退全局镜像
+      // snap.lastRequest/snap.pendingConfirm——那是"最近任意会话"的证据，
+      // 会话A的请求记录会污染新会话的面板事实行。只有旧宿主（无映射字段）
+      // 或无会话上下文（探测/设置页）才回退全局镜像。
       const sid = typeof sessionId === 'string' && sessionId ? sessionId : null;
+      const hasLRMap = sid !== null
+        && snap?.sessionLastRequest
+        && typeof snap.sessionLastRequest === 'object';
+      const hasPCMap = sid !== null
+        && snap?.sessionPendingConfirm
+        && typeof snap.sessionPendingConfirm === 'object';
       const scopedLR = sid ? snap?.sessionLastRequest?.[sid] : null;
       const scopedPC = sid ? snap?.sessionPendingConfirm?.[sid] : null;
-      const lr = scopedLR || snap?.lastRequest;
-      const pc = scopedPC || snap?.pendingConfirm;
+      const lr = scopedLR || (!hasLRMap ? snap?.lastRequest : null);
+      const pc = scopedPC || (!hasPCMap ? snap?.pendingConfirm : null);
       const pcNewer = Boolean(pc) && (!lr || pc.at >= lr.at);
       const label = (i) => (i < 0 ? 'P1' : (snap?.p1Follow ? `P${i + 2}` : `P${i + 1}`));
       const muted = 'var(--dsw-alias-label-secondary)';
@@ -1675,6 +1685,10 @@ window.__ModuleLoader__.load({
         && Number.isInteger(snap.sessionManual[props.sessionId])
         ? snap.sessionManual[props.sessionId]
         : undefined;
+      // 新会话隔离修复（2026-11-09）：宿主已按会话下发 sessionManual 映射时，
+      // 本会话未命中就显示「无手动目标」，绝不回退全局镜像 snap.manualIndex——
+      // 那是"最近任意会话"的手动切换，会话A手动切过 P3，新会话芯片就跟着跳 P3。
+      // 只有旧宿主（没有 sessionManual 字段）才退回全局镜像。
       const manualTarget = myManual !== undefined
         ? myManual
         : !hasSessionManualMap && Number.isInteger(snap?.manualIndex) ? snap.manualIndex : undefined;
@@ -1806,8 +1820,18 @@ window.__ModuleLoader__.load({
       // 用户实测的困惑：P1–P5 全挂、P6 兜底答了话，面板却标着「当前 P1」、
       // 模型名还挂在大泡菜上，于是他以为 P1 在干活。这里用 lastRequest 的成功记录
       // 拿到真正接管的 P 位；没有证据（还没成功过）才退回游标口径。
-      const scopedLR = props.sessionId && snap?.sessionLastRequest?.[props.sessionId];
-      const lastReq = scopedLR || snap?.lastRequest || null;
+      // 新会话隔离修复（2026-11-09）：宿主已按会话下发 sessionLastRequest 映射时，
+      // 本会话未命中就代表本会话还没答过话——应显示 P1，绝不回退全局镜像
+      // snap.lastRequest：那是"最近任意会话"的记录，会话A被切到 P3 后，新会话
+      // 芯片就跟着显示 P3（但行为层没问题：发消息仍从 P1 起跑）。只有旧宿主
+      // （没有 sessionLastRequest 字段）才退回全局镜像。
+      const hasSessionLRMap = props.sessionId !== undefined
+        && snap?.sessionLastRequest
+        && typeof snap.sessionLastRequest === 'object';
+      const scopedLR = hasSessionLRMap
+        ? (snap.sessionLastRequest[props.sessionId] || null)
+        : (props.sessionId && snap?.sessionLastRequest?.[props.sessionId]);
+      const lastReq = scopedLR || (!hasSessionLRMap ? snap?.lastRequest : null) || null;
       const served = lastReq && lastReq.state === 'ok' && Number.isInteger(lastReq.index) ? lastReq : null;
       // P1 行对应的位置：p1Follow 下是 -1，静态模式下是队列 0（也画在 P1 行）。
       const p1Slot = p1Follow ? -1 : 0;
@@ -2158,9 +2182,17 @@ window.__ModuleLoader__.load({
                       }))
                     : (() => {
                       // from===to 是空操作（老宿主会记），不显示成"P2 → P2"
-                      // 会话隔离：优先本会话的最近切换（sessionLastSwitch），无则回退全局镜像。
-                      const sw = (props.sessionId && snap?.sessionLastSwitch?.[props.sessionId])
-                        || snap?.lastSwitch;
+                      // 会话隔离：优先本会话的最近切换（sessionLastSwitch）。
+                      // 新会话隔离修复（2026-11-09）：宿主已下发映射时本会话未命中
+                      // 就显示「无切换记录」，不回退全局镜像 snap.lastSwitch——
+                      // 那是别的会话的切换，只有旧宿主才回退全局。
+                      const hasSwMap = props.sessionId !== undefined
+                        && snap?.sessionLastSwitch
+                        && typeof snap.sessionLastSwitch === 'object';
+                      const sw = hasSwMap
+                        ? (snap.sessionLastSwitch[props.sessionId] || null)
+                        : ((props.sessionId && snap?.sessionLastSwitch?.[props.sessionId])
+                          || snap?.lastSwitch);
                       return h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                         sw && sw.from !== sw.to
                           ? t('recentSwitch', { from: lbl(sw.from), to: lbl(sw.to) })
