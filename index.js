@@ -69,6 +69,21 @@ const DEFAULT_CONFIG = {
   probeConcurrency: 4,
   // 「探测完成」逐条状态在快照里保留多久（毫秒），到点自动清空/淡出。
   probeStatusTtlMs: 4000,
+  // 跨路由（换 provider/model）时，历史 assistant 消息里的 thinking 无法带到新模型：
+  // 宿主的适配层按 source.provider 决定是否保留 replayState，跨适配器时 reasoning
+  // 会被丢掉。而有的 API 要求「text + tool_use」的 assistant 消息必须带 thinking 块，
+  // 否则 400（DeepSeek Anthropic 兼容端点原文：「The `content[].thinking` in the
+  // thinking mode must be passed back to the API.」）。
+  //
+  // 对这里列出的 provider，下发给它之前把这类消息的 text 块摘掉：assistant 只带
+  // tool_use（不带 text、不带 thinking）是该 API 接受的形状，工具调用/参数/结果不动，
+  // 只损失模型写在工具调用旁边的解说文字——跨适配器降级时最小的损失。
+  strictThinkingProviders: ['deepseek-official'],
+  // provider → 该 provider 原生 replayState.response.kind。历史消息的 thinking 只有
+  // 在 kind 与目标 provider 原生 kind 一致时才能真正被重放；对不上（比如 z.ai 的
+  // pi-ai 历史送到 DeepSeek）就按“跨适配器历史”处理。未列出的 provider 视为不可确认。
+  // 形如 'provider=replayKind'；数组而不是 dict，是为了兼容宿主/测试里的极简 schema。
+  nativeReplayKinds: ['deepseek-official=deepseek-messages'],
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -276,11 +291,107 @@ function parseResetAt(message) {
 function withRouteOverride(cfg, route) {
   const routeChanged = cfg.provider !== route.provider || cfg.model !== route.model;
   if (!routeChanged) return cfg;
-  if (cfg.reasoningEffort === undefined) {
-    return { ...cfg, provider: route.provider, model: route.model };
-  }
-  const { reasoningEffort: _dropped, ...rest } = cfg;
+  // 路由变了就不继承上一台模型适配器物化出来的控制字段：
+  //  - reasoningEffort —— 目标模型可能不认这个档位（宿主会 0ms 本地拒绝）；
+  //  - maxTokens       —— 这是 P1 适配器的默认输出上限（DeepSeek 256k），
+  //                       换到上限更低的网关（z.ai/GLM 131072）会直接 400 code 1210。
+  const { reasoningEffort: _droppedEffort, maxTokens: _droppedMaxTokens, ...rest } = cfg;
   return { ...rest, provider: route.provider, model: route.model };
+}
+
+/** 归一化配置里的 provider 列表（容错：非数组/空串直接忽略）。 */
+function providerList(value) {
+  return Array.isArray(value) ? value.filter((x) => typeof x === 'string' && x.length > 0) : [];
+}
+
+/** 读取 provider → 原生 replayState.response.kind 映射。 */
+function nativeReplayKindMap(config) {
+  const map = new Map();
+  const declared = config ? config.nativeReplayKinds : undefined;
+  const entries = Array.isArray(declared)
+    ? declared
+        .filter((entry) => typeof entry === 'string')
+        .map((entry) => {
+          const at = entry.indexOf('=');
+          return at < 0 ? [entry, ''] : [entry.slice(0, at).trim(), entry.slice(at + 1).trim()];
+        })
+    : declared && typeof declared === 'object'
+      ? Object.entries(declared)
+      : [];
+  for (const [provider, kind] of entries) {
+    if (typeof provider === 'string' && provider.length > 0 && typeof kind === 'string' && kind.length > 0) {
+      map.set(provider, kind);
+    }
+  }
+  return map;
+}
+
+/** 这条 assistant 消息的 thinking 能否被目标路由原生重放。 */
+function messageReplayIsNative(message, route, kinds) {
+  const source = message && message.source;
+  if (!source || typeof source !== 'object') return false;
+  if (source.provider !== route.provider || source.model !== route.model) return false;
+  const expected = kinds.get(route.provider);
+  if (expected === undefined) return false; // 原生 kind 未声明 = 无法确认可重放
+  const kind = source.replayState && source.replayState.response && source.replayState.response.kind;
+  return kind === expected;
+}
+
+/**
+ * 历史适配：目标路由无法重放旧 thinking 时，摘掉「text + tool_use」assistant 消息的 text。
+ *
+ * 只对 config.strictThinkingProviders 里列出的 provider 生效；路由不变或历史本来就是
+ * 该路由原生生成的（replay kind 对得上）时原样返回，不动用户的历史。
+ *
+ * @param {Array<object>} messages 宿主请求里的 harness 消息数组（可能被冻结）
+ * @param {{provider: string, model: string}} route 目标路由
+ * @param {object} config 插件配置（strictThinkingProviders / nativeReplayKinds）
+ * @param {{onAdapted?: (count: number) => void}} hooks 适配计数回调（日志用）
+ * @returns {Array<object>|Array} 原数组（无需改动）或改写后的新数组
+ */
+function adaptMessagesForRoute(messages, route, config = {}, hooks = {}) {
+  if (!Array.isArray(messages)) return messages;
+  const strict = new Set(providerList(config.strictThinkingProviders));
+  if (!strict.has(route.provider)) return messages;
+  const kinds = nativeReplayKindMap(config);
+  let adapted = 0;
+  const out = messages.map((message) => {
+    if (!message || message.role !== 'assistant' || !Array.isArray(message.content)) return message;
+    const blocks = message.content;
+    const hasToolCall = blocks.some((block) => block && block.type === 'tool-call');
+    if (!hasToolCall) return message;
+    const hasText = blocks.some((block) => block && block.type === 'text' && typeof block.text === 'string' && block.text.length > 0);
+    if (!hasText) return message;
+    if (messageReplayIsNative(message, route, kinds)) return message;
+    adapted += 1;
+    const content = Object.freeze(blocks.filter((block) => !(block && block.type === 'text')));
+    return Object.freeze({ ...message, content });
+  });
+  if (adapted === 0) return messages;
+  hooks.onAdapted?.(adapted);
+  return Object.freeze(out);
+}
+
+/**
+ * 队列里一条路由对应的子请求参数：换路由 + 剥掉上一台适配器物化的控制字段 + 历史适配。
+ *
+ * 不换路由时原样返回（只换 provider/model 是恒等变换），保持单路由请求的既有行为。
+ *
+ * @param {object} options 宿主 llm.stream 的原始请求（provider/model 为 P1）
+ * @param {{provider: string, model: string}} route 实际要试的路由
+ * @param {object} config 插件配置
+ * @param {{onAdapted?: (count: number) => void}} hooks 历史适配计数回调
+ * @returns {object} 可直接下发给宿主 llm.stream 的请求
+ */
+function routeCallOptions(options, route, config = {}, hooks = {}) {
+  const routeChanged = options.provider !== route.provider || options.model !== route.model;
+  const next = { ...options, provider: route.provider, model: route.model };
+  if (!routeChanged) return next;
+  delete next.reasoningEffort;
+  delete next.maxTokens;
+  const adapted = adaptMessagesForRoute(options.messages, route, config, hooks);
+  if (adapted !== options.messages) next.messages = adapted;
+  return next;
 }
 
 function createRouter(config, log) {
@@ -2267,11 +2378,23 @@ export function apply(ctx, pluginConfig = {}) {
     return best;
   }
 
-  /** 子请求参数：换成真实路由，剥掉上一台模型的推理档位（换模型不继承档位）。 */
+  /**
+   * 子请求参数：换成真实路由，剥掉上一台模型的推理档位/输出上限，并适配历史 thinking。
+   *
+   * 换路由时必须重算适配器默认值：maxTokens 是 P1 适配器物化出来的（DeepSeek 256k），
+   * 原样带给上限更低的网关会 400；reasoningEffort 是上一台模型的能力选择，目标模型
+   * 可能不认。历史里的 thinking 跨适配器带不过去，对严格 thinking 的目标摘掉 text（见
+   * adaptMessagesForRoute）。
+   */
   function subCallOptions(options, route) {
-    const o = { ...options, provider: route.provider, model: route.model };
-    delete o.reasoningEffort;
-    return o;
+    return routeCallOptions(options, route, config, {
+      onAdapted: (count) => ctx.logger?.info?.(
+        '[fallback-queue] route %s/%s: dropped text from %d assistant message(s) whose thinking cannot replay across adapters',
+        route.provider,
+        route.model,
+        count,
+      ),
+    });
   }
 
   /**
@@ -2526,4 +2649,9 @@ export const Config = s.object({
   // 于是「能正常对话的模型」长期显示探测失败——默认 8 是为了让探测请求本身合法。
   pingMaxTokens: s.number().default(DEFAULT_CONFIG.pingMaxTokens).description('探测请求的 maxTokens（默认 8；过小会被部分网关 400 拒绝）').volatile(),
   probeConcurrency: s.number().default(DEFAULT_CONFIG.probeConcurrency).description('「探测全部」并发数（默认 4；越大越快但更易触发网关限流）').volatile(),
+  // 跨路由历史适配：这些 provider 要求 tool-call 的 assistant 消息带 thinking 块，
+  // 跨适配器切换时宿主会丢 reasoning，于是下发前把该消息的 text 块摘掉（见 index.js）。
+  strictThinkingProviders: s.array(s.string()).default(DEFAULT_CONFIG.strictThinkingProviders).description('要求 tool-call assistant 消息带 thinking 的 provider；跨路由时摘掉其 text 块').volatile(),
+  // provider → 原生 replayState.response.kind，用于判断历史 thinking 能否被目标重放。
+  nativeReplayKinds: s.array(s.string()).default(DEFAULT_CONFIG.nativeReplayKinds).description('provider=原生 replay kind（例如 deepseek-official=deepseek-messages），用于判断历史 thinking 能否重放').volatile(),
 });

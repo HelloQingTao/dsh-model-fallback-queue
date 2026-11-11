@@ -36,6 +36,28 @@
 - **失败原因说人话**：探测失败不再一律写「探测失败」，而是按上游原文归类成「额度用尽 / 免费额度用尽 / 被限流 / 连不上 / 探测超时 / 鉴权失败」，完整原文进悬浮提示；上游给了明确解锁时刻时，面板直接显示倒计时。
 - **面板直接点选切换**：点芯片面板里的任意一行，立即把生效路由切到该模型（不用等它故障）；切换是**按会话隔离**的——在哪个会话切，只在那个会话生效，不会影响其它已在跑的会话。P1 行在已生效时点击会打开宿主的模型选择器——P1 的身份就是当前会话模型，只有宿主能改。
 
+### 跨路由（provider/model）切换的适配
+
+P1 失败、队列切到另一个 provider/model 时，宿主的请求里有两类内容不能原样带过去：
+
+1. **适配器物化的控制字段。** 宿主的 `prepareCall` 会把 P1 适配器的默认输出上限物化进请求
+   （DeepSeek 适配器默认 `maxTokens: 256000`）。旧实现只剥 `reasoningEffort`，把 `maxTokens`
+   原样带给目标；z.ai/GLM 的上限是 131072，于是直接
+   `400 code 1210 "The max_tokens parameter is illegal.：限制数值范围[1,131072]"`。
+   现在换路由时一并剥掉 `maxTokens`——目标模型经宿主的 `prepareCall` 解析自己的默认值。
+
+2. **跨适配器不可重放的 thinking。** 历史 assistant 消息的 thinking 只在同一适配器 + 同一模型
+   下可重放；跨 provider/model 切换时宿主会丢掉 reasoning，而 DeepSeek 的 Anthropic 兼容
+   端点要求「text + tool_use」的 assistant 消息必须带 thinking 块，否则
+   `400 "The `content[].thinking` in the thinking mode must be passed back to the API."`。
+   现在对 `strictThinkingProviders`（默认 `deepseek-official`）下发的请求，把这类消息的 text 块
+   摘掉（tool_use、参数、工具结果不动）——这是该 API 接受的形状，也是跨适配器降级时最小的损失。
+   原生可重放与否由 `nativeReplayKinds`（`provider=replayKind`，默认
+   `deepseek-official=deepseek-messages`）判断。
+
+新增配置：`strictThinkingProviders`（string[]）、`nativeReplayKinds`（string[]，`provider=kind`）。
+测试：`node scripts/test-route-adaptation.mjs`，以及 `scripts/verify-execution.mjs` 场景 H/H-2。
+
 ### 效果图
 
 设置页（开关 / 队列 / P1 恢复策略）：

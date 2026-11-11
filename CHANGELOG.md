@@ -2,6 +2,36 @@
 
 本项目更新日志按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — 跨路由切换不再制造 400
+
+### 修复
+
+**① 换路由时不再把 P1 的 `maxTokens` 带给目标模型**
+
+宿主的 `prepareCall` 会把 P1 适配器的默认输出上限物化进请求（DeepSeek 团队默认
+`maxTokens: 256000`）。旧实现换路由时只剥 `reasoningEffort`，`maxTokens` 原样带到
+目标；z.ai/GLM 的上限是 131072，于是直接 `400 code 1210 "The max_tokens parameter
+is illegal.：限制数值范围[1,131072]"`，整轮对话中断。现在换路由时一并剥掉
+`maxTokens`，让目标模型自己解析默认值（DeepSeek 256k / GLM 131072 各归各）。
+
+**② 跨适配器切换时适配历史 thinking**
+
+历史 assistant 消息的 thinking 只在同一适配器 + 同一模型下可重放；跨 provider/模型
+切换时宿主会丢掉 reasoning，而 DeepSeek 的 Anthropic 兼容端点要求「text + tool_use」
+的 assistant 消息必须带 thinking 块，否则
+`400 "The `content[].thinking` in the thinking mode must be passed back to the API."`。
+现在对 `strictThinkingProviders`（默认 `deepseek-official`）下发的请求，把这类消息的
+text 块摘掉（tool_use / 参数 / 工具结果不动）——这是该 API 接受的形状，也是跨适配器
+降级时最小的损失。是否原生可重放由 `nativeReplayKinds`
+（`provider=replayKind`，默认 `deepseek-official=deepseek-messages`）判断。
+
+### 新增配置
+
+- `strictThinkingProviders`（字符串数组）：要求 tool-call 的 assistant 消息带 thinking
+  的 provider；跨路由时摘掉其 text 块。
+- `nativeReplayKinds`（字符串数组，`provider=kind`）：provider 的原生 replay kind，
+  用于判断历史 thinking 能否被目标重放。
+
 ## [0.3.6] — 会话各看各的：显示隔离 + 「当前」跟随真实作答 + 恢复策略
 
 ### 修复

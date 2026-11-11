@@ -5,8 +5,8 @@
   "type": "module",
   "main": "./index.js",
   "scripts": {
-    "test": "node scripts/verify-health-colors.mjs && node scripts/test-queue-order.mjs && node scripts/verify-execution.mjs",
-    "test:src": "node scripts/verify-health-colors.mjs && node scripts/test-queue-order.mjs",
+    "test": "node scripts/verify-health-colors.mjs && node scripts/test-queue-order.mjs && node scripts/test-route-adaptation.mjs && node scripts/verify-execution.mjs",
+    "test:src": "node scripts/verify-health-colors.mjs && node scripts/test-queue-order.mjs && node scripts/test-route-adaptation.mjs",
     "test:e2e": "node scripts/verify-execution.mjs",
     "prepare:test": "node scripts/prepare-test-deps.mjs"
   },

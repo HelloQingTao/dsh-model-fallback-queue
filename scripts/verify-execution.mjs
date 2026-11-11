@@ -1042,6 +1042,123 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
   }
 }
 
+// ================= 场景 H：跨路由适配（wl 补丁，2026-11-11）=================
+// 真机故障两条，都由「P1 失败 → 换到另一个 provider」触发：
+//  1) DeepSeek 会话（P1 默认 maxTokens=256000）切到 zai/glm-5.3，子请求仍带
+//     maxTokens=256000 → z.ai 400 code 1210「限制数值范围[1,131072]」。
+//  2) GLM 会话（P1=zai）切到 deepseek-official：历史 assistant 消息的 thinking
+//     跨适配器带不过去，而 DeepSeek Anthropic 端点要求「text + tool_use」的
+//     assistant 消息必须带 thinking 块 → 400「content[].thinking ... passed back」。
+// 补丁语义：换路由时剥 maxTokens/reasoningEffort；对 strict provider 摘掉
+// 无法重放 thinking 的 tool-call assistant 消息的 text 块（tool-call 保留）。
+{
+  const xllm = makeLlm();
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0 }, xllm);
+  mod.apply(ctx, {
+    enabled: true,
+    strictThinkingProviders: ['deepseek-official'],
+    nativeReplayKinds: ['deepseek-official=deepseek-messages'],
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  const svc = ctx.__service;
+  if (svc && hooks['llm/stream']) {
+    const collect = async (options) => {
+      const it = hooks['llm/stream'](options, () => xllm.stream(options));
+      const arr = [];
+      for await (const c of it) arr.push(c);
+      return arr;
+    };
+
+    // ---- 1) P1=deepseek-official/auth（失败）→ 队列 zai/glm-5.3（成功）----
+    await svc.setQueue([{ provider: 'zai', model: 'glm-5.3' }]);
+    xllm.calls.length = 0;
+    xllm.reqs.length = 0;
+    await collect({
+      sessionId: 'sess-wl-controls',
+      provider: 'deepseek-official',
+      model: 'auth',
+      reasoningEffort: 'max',
+      maxTokens: 256000,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    });
+    ok('wl：P1 失败后真的换到队列路由', xllm.calls[0] === 'deepseek-official/auth' && xllm.calls[1] === 'zai/glm-5.3', xllm.calls.join(','));
+    ok('wl：换路由后 maxTokens 不继承（否则 z.ai 400 code 1210）', xllm.reqs[1]?.maxTokens === undefined, `maxTokens=${xllm.reqs[1]?.maxTokens}`);
+    ok('wl：换路由后 reasoningEffort 不继承', xllm.reqs[1]?.reasoningEffort === undefined, `effort=${xllm.reqs[1]?.reasoningEffort}`);
+
+  }
+}
+
+// 场景 H-2：GLM 会话 → DeepSeek 的历史适配。单独的 ctx：路由器有全局会话模型快照，
+// 同一实例里跨用例会互相污染（P1 会沿用上一个用例记下的模型）。
+{
+  const yllm = makeLlm();
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0 }, yllm);
+  mod.apply(ctx, {
+    enabled: true,
+    strictThinkingProviders: ['deepseek-official'],
+    nativeReplayKinds: ['deepseek-official=deepseek-messages'],
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  const svc = ctx.__service;
+  if (svc && hooks['llm/stream']) {
+    const collect = async (options) => {
+      const it = hooks['llm/stream'](options, () => yllm.stream(options));
+      const arr = [];
+      for await (const c of it) arr.push(c);
+      return arr;
+    };
+    // ---- P1=zai/auth（失败）→ 队列 deepseek-official/good（成功）----
+    await svc.setQueue([{ provider: 'deepseek-official', model: 'good' }]);
+    const foreignAssistant = {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'думаю' },
+        { type: 'text', text: 'сейчас вызову тул' },
+        { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+      ],
+      source: { kind: 'model', provider: 'zai', model: 'glm-5.3', replayState: { response: { kind: 'pi-ai' } } },
+    };
+    const nativeAssistant = {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'думаю' },
+        { type: 'text', text: 'нативный шаг' },
+        { type: 'tool-call', id: 'c2', name: 'bash', arguments: '{}' },
+      ],
+      source: { kind: 'model', provider: 'deepseek-official', model: 'good', replayState: { response: { kind: 'deepseek-messages' } } },
+    };
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      foreignAssistant,
+      nativeAssistant,
+    ];
+    yllm.calls.length = 0;
+    yllm.reqs.length = 0;
+    await collect({
+      sessionId: 'sess-wl-history',
+      provider: 'zai',
+      model: 'auth',
+      reasoningEffort: 'high',
+      messages,
+    });
+    ok('wl：z.ai 失败后换到 deepseek（而不是原地报错）', yllm.calls[0] === 'zai/auth' && yllm.calls[1] === 'deepseek-official/good', yllm.calls.join(','));
+    const sentMessages = yllm.reqs[1]?.messages || [];
+    ok(
+      'wl：跨适配器 assistant（text+tool_use）摘掉 text，tool-call 保留',
+      Array.isArray(sentMessages[1]?.content)
+        && sentMessages[1].content.every((b) => b.type !== 'text')
+        && sentMessages[1].content.some((b) => b.type === 'tool-call'),
+      JSON.stringify((sentMessages[1]?.content || []).map((b) => b.type)),
+    );
+    ok(
+      'wl：原生的 DeepSeek assistant 消息不被改写',
+      Array.isArray(sentMessages[2]?.content) && sentMessages[2].content.some((b) => b.type === 'text') && sentMessages[2].content.length === 3,
+      JSON.stringify((sentMessages[2]?.content || []).map((b) => b.type)),
+    );
+    ok('wl：会话历史本身没有被改写（只改下发的副本）', messages[1].content.length === 3);
+  }
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
 if (failed.length) {
