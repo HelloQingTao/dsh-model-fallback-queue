@@ -75,9 +75,15 @@ const bundle = names.map((name) => extractFunction(indexSrc, name)).join('\n');
 const build = new Function(`${bundle}\nreturn { adaptMessagesForRoute, routeCallOptions };`);
 const { adaptMessagesForRoute, routeCallOptions } = build();
 
+// 默认值直接从 index.js 源码取：测试里另写一份的话，改了 DEFAULT_CONFIG 也测不出来。
+function extractDefaultArray(src, key) {
+  const m = src.match(new RegExp(`\\b${key}:\\s*(\\[[^\\]]*\\])`));
+  if (!m) throw new Error(`missing default ${key} in index.js`);
+  return new Function(`return ${m[1]}`)();
+}
 const CONFIG = {
-  strictThinkingProviders: ['deepseek-official'],
-  nativeReplayKinds: ['deepseek-official=deepseek-messages'],
+  strictThinkingProviders: extractDefaultArray(indexSrc, 'strictThinkingProviders'),
+  nativeReplayKinds: extractDefaultArray(indexSrc, 'nativeReplayKinds'),
 };
 
 const text = (value) => Object.freeze({ type: 'text', text: value });
@@ -162,6 +168,19 @@ eq('text-only assistant не тронут', adapted[4], textOnly);
 eq('tool-only assistant не тронут', adapted[5], toolOnly);
 eq('user message не тронут', adapted[0], userMessage);
 check('адаптированные сообщения заморожены', Object.isFrozen(adapted[1]) && Object.isFrozen(adapted[1].content));
+
+// ---- 1b) deepseek-account 与 deepseek-official 共用 dsh-llm-deepseek 适配器，默认名单里必须都有 ----
+check('默认名单含 deepseek-account', CONFIG.strictThinkingProviders.includes('deepseek-account'));
+check('默认 replay 映射含 deepseek-account', CONFIG.nativeReplayKinds.includes('deepseek-account=deepseek-messages'));
+const accountAdapted = adaptMessagesForRoute(messages, { provider: 'deepseek-account', model: 'deepseek-flash' }, CONFIG);
+eq('换到 deepseek-account：foreign 历史 text 已摘', accountAdapted[1].content.map((b) => b.type), ['reasoning', 'tool-call']);
+const accountNative = assistantFixture({
+  provider: 'deepseek-account',
+  model: 'deepseek-flash',
+  replayKind: 'deepseek-messages',
+  blocks: [reasoning('r'), text('t'), toolCall('c-account')],
+});
+check('deepseek-account 原生 replay 历史不碰', adaptMessagesForRoute([accountNative], { provider: 'deepseek-account', model: 'deepseek-flash' }, CONFIG)[0] === accountNative);
 
 // ---- 2) 没有需要改的消息 → 原数组（引用相同，省内存） ----
 const untouched = adaptMessagesForRoute(Object.freeze([userMessage, deepseekNative]), { provider: 'deepseek-official', model: 'deepseek-flash' }, CONFIG);

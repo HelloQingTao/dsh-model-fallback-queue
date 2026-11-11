@@ -20,10 +20,12 @@ is illegal.：限制数值范围[1,131072]"`，整轮对话中断。现在换路
 切换时宿主会丢掉 reasoning，而 DeepSeek 的 Anthropic 兼容端点要求「text + tool_use」
 的 assistant 消息必须带 thinking 块，否则
 `400 "The `content[].thinking` in the thinking mode must be passed back to the API."`。
-现在对 `strictThinkingProviders`（默认 `deepseek-official`）下发的请求，把这类消息的
+现在对 `strictThinkingProviders`（默认 `deepseek-official`、`deepseek-account`——两者共用
+同一套 DeepSeek 适配器与 replay 格式）下发的请求，把这类消息的
 text 块摘掉（tool_use / 参数 / 工具结果不动）——这是该 API 接受的形状，也是跨适配器
 降级时最小的损失。是否原生可重放由 `nativeReplayKinds`
-（`provider=replayKind`，默认 `deepseek-official=deepseek-messages`）判断。
+（`provider=replayKind`，默认 `deepseek-official=deepseek-messages`、
+`deepseek-account=deepseek-messages`）判断。
 
 ### 新增配置
 

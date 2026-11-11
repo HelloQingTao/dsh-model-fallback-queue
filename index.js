@@ -78,12 +78,18 @@ const DEFAULT_CONFIG = {
   // 对这里列出的 provider，下发给它之前把这类消息的 text 块摘掉：assistant 只带
   // tool_use（不带 text、不带 thinking）是该 API 接受的形状，工具调用/参数/结果不动，
   // 只损失模型写在工具调用旁边的解说文字——跨适配器降级时最小的损失。
-  strictThinkingProviders: ['deepseek-official'],
+  // deepseek-account 与 deepseek-official 共用 @deepseek-ai/dsh-llm-deepseek 适配器：
+  // 同一套 serialize / replayState（kind 都是 deepseek-messages），严格 thinking 的
+  // 约束对它一样成立，默认名单里不能只写一个。
+  strictThinkingProviders: ['deepseek-official', 'deepseek-account'],
   // provider → 该 provider 原生 replayState.response.kind。历史消息的 thinking 只有
   // 在 kind 与目标 provider 原生 kind 一致时才能真正被重放；对不上（比如 z.ai 的
   // pi-ai 历史送到 DeepSeek）就按“跨适配器历史”处理。未列出的 provider 视为不可确认。
   // 形如 'provider=replayKind'；数组而不是 dict，是为了兼容宿主/测试里的极简 schema。
-  nativeReplayKinds: ['deepseek-official=deepseek-messages'],
+  nativeReplayKinds: [
+    'deepseek-official=deepseek-messages',
+    'deepseek-account=deepseek-messages',
+  ],
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -268,35 +274,6 @@ function parseResetAt(message) {
     }
   }
   return 0;
-}
-
-/**
- * 把请求配置换成队列里的目标路由，并**剥掉推理档位**。
- *
- * 为什么必须剥：cfg.reasoningEffort（如 'balanced'）是「上一台模型」的能力选择。
- * 宿主的 LlmService 在发请求前拿它去校验目标模型的能力清单（resolveCallWithInfo），
- * 不匹配就直接抛 UNSUPPORTED_REASONING_EFFORT —— 那是本地 0 毫秒拒绝，一条请求
- * 都没发出去。于是会出现最难查的一种状态：
- *
- *   探测（不带档位）判它健康 → 真实请求（带档位）永远失败 → 失败还被记成路由的锅
- *
- * 语义与宿主自己的 `dsh-tool-subagent` 一致（requestedAgentOptions /
- * preflightChildLlmRoute）：路由变了就不继承父级 reasoningEffort，只让目标模型
- * 用它自己的默认档位。路由没变时原样返回，不动用户的选择。
- *
- * @param {object} cfg 宿主传入的原始请求配置
- * @param {{provider: string, model: string}} route 目标路由
- * @returns {object} 可直接下发给宿主的配置
- */
-function withRouteOverride(cfg, route) {
-  const routeChanged = cfg.provider !== route.provider || cfg.model !== route.model;
-  if (!routeChanged) return cfg;
-  // 路由变了就不继承上一台模型适配器物化出来的控制字段：
-  //  - reasoningEffort —— 目标模型可能不认这个档位（宿主会 0ms 本地拒绝）；
-  //  - maxTokens       —— 这是 P1 适配器的默认输出上限（DeepSeek 256k），
-  //                       换到上限更低的网关（z.ai/GLM 131072）会直接 400 code 1210。
-  const { reasoningEffort: _droppedEffort, maxTokens: _droppedMaxTokens, ...rest } = cfg;
-  return { ...rest, provider: route.provider, model: route.model };
 }
 
 /** 归一化配置里的 provider 列表（容错：非数组/空串直接忽略）。 */
