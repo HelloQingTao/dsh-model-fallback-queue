@@ -1628,6 +1628,12 @@ window.__ModuleLoader__.load({
       const [panelPos, setPanelPos] = React.useState(null);
       // react-dom 可用才 portal；否则退回原地 absolute 渲染（保底，不丢功能）。
       const canPortal = Boolean(ReactDOM) && typeof document !== 'undefined';
+      // 悬浮自动展开：鼠标移到芯片上即展开，移开 180ms 后收起（移入面板会取消收起）；
+      // 芯片与面板之间有 8px 间隙，用延时跨过，避免一路过缝隙就闪关。
+      const hoverCloseTimer = React.useRef(null);
+      const cancelHoverClose = () => { if (hoverCloseTimer.current) { clearTimeout(hoverCloseTimer.current); hoverCloseTimer.current = null; } };
+      const scheduleHoverClose = () => { cancelHoverClose(); hoverCloseTimer.current = setTimeout(() => setOpen(false), 200); };
+      React.useEffect(() => () => cancelHoverClose(), []);
       // 切换反馈的自动消失计时器（点完 2.6s 收掉提示条）
       const flashTimer = React.useRef(null);
       // DOM 取名函数存一份引用：点开弹层时要立刻重读一次，不能等 3s 轮询。
@@ -2028,20 +2034,20 @@ window.__ModuleLoader__.load({
       const STROKE = 'var(--dsw-elevation-stroke-color, rgba(0,0,0,.08))';
       const mutedFg = 'var(--dsw-alias-label-secondary, #8a8798)';
       const idxChipStyle = (active) => ({
-        flex: '0 0 auto', fontSize: 9.5, fontWeight: 750, letterSpacing: '.3px',
-        padding: '2px 6px', borderRadius: 5, lineHeight: '12px',
+        flex: '0 0 auto', fontSize: 8.5, fontWeight: 750, letterSpacing: '.3px',
+        padding: '1px 5px', borderRadius: 4, lineHeight: '11px',
         ...(active
           ? { background: ACC_G, color: '#fff', boxShadow: `0 1px 4px ${ACC_TINT(30)}` }
           : { background: 'var(--dsw-elevation-stroke-color, #f1f0f5)', color: mutedFg }),
       });
       const currentPillStyle = () => ({
-        flex: '0 0 auto', fontSize: 9.5, fontWeight: 650, color: '#fff',
-        background: ACC_G, padding: '2px 7px', borderRadius: 999, lineHeight: '12px',
+        flex: '0 0 auto', fontSize: 8.5, fontWeight: 650, color: '#fff',
+        background: ACC_G, padding: '1px 6px', borderRadius: 999, lineHeight: '11px',
         boxShadow: `0 1px 4px ${ACC_TINT(28)}`, whiteSpace: 'nowrap',
       });
       const rowCardStyle = (active) => ({
-        display: 'flex', alignItems: 'center', gap: 7, padding: '8px 9px',
-        borderRadius: 10, fontSize: 11.5, marginBottom: 5,
+        display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px',
+        borderRadius: 9, fontSize: 10.5, marginBottom: 4,
         border: `1px solid ${active ? ACC_TINT(30) : STROKE}`,
         background: SURFACE,
         boxShadow: active ? `0 2px 8px ${ACC_TINT(10)}` : 'none',
@@ -2057,9 +2063,9 @@ window.__ModuleLoader__.load({
             left: panelPos ? panelPos.left : 0,
             top: panelPos ? panelPos.top : 0,
             visibility: panelPos ? 'visible' : 'hidden',
-            minWidth: 'min(320px, calc(100vw - 16px))',
+            minWidth: 'min(280px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 14,
+            borderRadius: 12,
             border: `1px solid ${STROKE}`,
             background: PANEL_BG,
             boxShadow: '0 12px 30px rgba(0,0,0,.14), 0 2px 5px rgba(0,0,0,.05)',
@@ -2072,9 +2078,9 @@ window.__ModuleLoader__.load({
             position: 'absolute',
             bottom: 'calc(100% + 10px)',
             right: 0,
-            minWidth: 'min(320px, calc(100vw - 16px))',
+            minWidth: 'min(280px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 14,
+            borderRadius: 12,
             border: `1px solid ${STROKE}`,
             background: PANEL_BG,
             boxShadow: '0 12px 30px rgba(0,0,0,.14), 0 2px 5px rgba(0,0,0,.05)',
@@ -2093,6 +2099,8 @@ window.__ModuleLoader__.load({
           {
             className: 'fq-badge',
             onClick: () => setOpen((v) => !v),
+            onMouseEnter: () => { cancelHoverClose(); setOpen(true); },
+            onMouseLeave: () => { if (open) scheduleHoverClose(); },
             title: `${t('failoverTitle')} · ${lbl(currentIdx)} ${effHealth.text}${effHealth.detail ? ` · ${effHealth.detail}` : ''}`,
             'aria-label': t('failoverTitle'),
             style: {
@@ -2127,13 +2135,15 @@ window.__ModuleLoader__.load({
               {
                 ref: panelRef,
                 style: panelStyle,
+                onMouseEnter: cancelHoverClose,
+                onMouseLeave: scheduleHoverClose,
               },
               // 标题行（版本 A：紫色闪电图标 + 标题 + 状态胶囊）
               h(
                 'div',
                 {
                   style: {
-                    padding: '10px 13px 8px',
+                    padding: '8px 11px 6px',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -2141,27 +2151,27 @@ window.__ModuleLoader__.load({
                 },
                 h(
                   'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 } },
+                  { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
                   h(
                     'span',
                     {
                       style: {
-                        width: 18, height: 18, borderRadius: 6, background: ACC_G, flex: 'none',
+                        width: 16, height: 16, borderRadius: 5, background: ACC_G, flex: 'none',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                         boxShadow: `0 2px 6px ${ACC_TINT(30)}`,
                       },
                     },
-                    h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none' },
+                    h('svg', { width: 9, height: 9, viewBox: '0 0 24 24', fill: 'none' },
                       h('path', { d: 'M13 2L4.5 13.5H11L10 22L19.5 9.5H12.5L13 2Z', fill: '#fff' })),
                   ),
-                  h('span', { style: { fontSize: 13, fontWeight: 600, letterSpacing: '.2px', whiteSpace: 'nowrap' } }, t('failoverTitle')),
+                  h('span', { style: { fontSize: 11.5, fontWeight: 600, letterSpacing: '.2px', whiteSpace: 'nowrap' } }, t('failoverTitle')),
                 ),
                 !enabled
                   ? h('span', {
                       style: {
-                        fontSize: 10.5, fontWeight: 600, color: mutedFg, whiteSpace: 'nowrap',
+                        fontSize: 9.5, fontWeight: 600, color: mutedFg, whiteSpace: 'nowrap',
                         background: 'var(--dsw-elevation-stroke-color, #f1f0f5)',
-                        padding: '3px 8px', borderRadius: 999,
+                        padding: '2px 7px', borderRadius: 999,
                       },
                     }, t('badgeDisabled'))
                   : allTripped
@@ -2170,13 +2180,13 @@ window.__ModuleLoader__.load({
                     : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(currentIdx) })),
               ),
               // 紫色渐变细分隔线
-              h('div', { style: { height: 1, margin: '0 11px', background: `linear-gradient(90deg, transparent, ${ACC_TINT(18)}, transparent)` } }),
+              h('div', { style: { height: 1, margin: '0 9px', background: `linear-gradient(90deg, transparent, ${ACC_TINT(18)}, transparent)` } }),
               // 面板顶部不再放独立提示行：探测结果 / 切换失败都并到底部工具条左侧，
               // 「上一轮真实请求」那行用户明确说没必要，已删除（面板空间留给路由本身）。
               // 队列条目
               h(
                 'div',
-                { style: { padding: '6px 9px 2px', display: 'flex', flexDirection: 'column' } },
+                { style: { padding: '5px 7px 2px', display: 'flex', flexDirection: 'column' } },
                 h('div', {
                     key: 'p1-row',
                     ...(enabled && !p1IsCurrent
@@ -2202,11 +2212,11 @@ window.__ModuleLoader__.load({
                     h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 520, opacity: p1IsCurrent ? 1 : 0.75 } },
                       p1DisplayName),
                     p1Follow
-                      ? h('span', { style: { flex: '0 0 auto', fontSize: 10, color: mutedFg } }, t('sessionModelSuffix', { name: '' }))
+                      ? h('span', { style: { flex: '0 0 auto', fontSize: 9, color: mutedFg } }, t('sessionModelSuffix', { name: '' }))
                       : null),
                   p1IsCurrent
                     ? h('span', { style: currentPillStyle() }, t('currentTag'))
-                    : (startHere ? h('span', { style: { fontSize: 9, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
+                    : (startHere ? h('span', { style: { fontSize: 8, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
                   // 没有 P1 视图（还没发过消息、拿不到会话模型）时不能写"正常"：
                   // 那是在替一条从未验证过的路由打包票。
                   healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('healthUnprobed')),
@@ -2215,7 +2225,7 @@ window.__ModuleLoader__.load({
                   circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0
-                  ? [h('div', { key: 'empty', style: { padding: '8px 5px', fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, t('noFallbacks'))]
+                  ? [h('div', { key: 'empty', style: { padding: '6px 4px', fontSize: 10, color: 'var(--dsw-alias-label-secondary)' } }, t('noFallbacks'))]
                   : entries.map((e) => {
                       // 队列下标就是生效位置，直接比（p1Follow 下 e.index===0 是 P2，不再排除）
                       const isActive = servedIdx !== null ? servedIdx === e.index : effective === e.index;
@@ -2237,7 +2247,7 @@ window.__ModuleLoader__.load({
                         ),
                         isActive
                           ? h('span', { style: currentPillStyle() }, t('currentTag'))
-                          : (startHereRow ? h('span', { style: { fontSize: 9, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
+                          : (startHereRow ? h('span', { style: { fontSize: 8, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
                         probeBadge(snap?.probeStatus?.[`${e.provider}\u0000${e.model}`]),
                         healthBadge(e, snap, Date.now()),
                         reviveButton(e, e.index),
@@ -2251,13 +2261,13 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   style: {
-                    padding: '8px 13px 10px',
+                    padding: '6px 11px 8px',
                     borderTop: `1px dashed ${ACC_TINT(20)}`,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     gap: 8,
-                    fontSize: 10.5,
+                    fontSize: 9.5,
                     color: 'var(--dsw-alias-label-secondary)',
                   },
                 },
