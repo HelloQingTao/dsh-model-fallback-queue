@@ -2030,27 +2030,30 @@ window.__ModuleLoader__.load({
       const ACC = 'var(--dsw-alias-brand-primary, #4f7cf7)';
       const ACC_G = ACC; // 纯色，不再用渐变
       const ACC_TINT = (pct) => `color-mix(in srgb, ${ACC} ${pct}%, transparent)`;
-      const SURFACE = 'var(--dsw-alias-bg-layer-1, var(--dsw-specific-menu, #ffffff))';
-      const STROKE = 'var(--dsw-elevation-stroke-color, rgba(0,0,0,.08))';
+      // 折中派 B：贴合宿主弹层配色 token（半透明 specific-menu 底 + 毛玻璃 + 极轻阴影 + radius16 + 中性激活），保留当前紧凑尺寸与字号
+      const SURFACE = 'linear-gradient(var(--dsw-specific-menu, rgba(248,249,250,.94)), var(--dsw-specific-menu, rgba(248,249,250,.94))), var(--dsw-alias-bg-layer-1, #ffffff)'; // 取宿主菜单同色，但不透明地铺在层色上：像宿主又不会透出底下的字/泛色
+      const STROKE = 'var(--dsw-alias-border-l1, rgba(0,0,0,.06))';
+      const NEUTRAL_ACTIVE = 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05))';
       const mutedFg = 'var(--dsw-alias-label-secondary, #8a8798)';
       const idxChipStyle = (active) => ({
         flex: '0 0 auto', fontSize: 8.5, fontWeight: 750, letterSpacing: '.3px',
         padding: '1px 5px', borderRadius: 4, lineHeight: '11px',
         ...(active
-          ? { background: ACC_G, color: '#fff', boxShadow: `0 1px 4px ${ACC_TINT(30)}` }
-          : { background: 'var(--dsw-elevation-stroke-color, #f1f0f5)', color: mutedFg }),
+          ? { background: ACC_G, color: '#fff' }
+          : { background: NEUTRAL_ACTIVE, color: mutedFg }),
       });
       const currentPillStyle = () => ({
-        flex: '0 0 auto', fontSize: 8.5, fontWeight: 650, color: '#fff',
-        background: ACC_G, padding: '1px 6px', borderRadius: 999, lineHeight: '11px',
-        boxShadow: `0 1px 4px ${ACC_TINT(28)}`, whiteSpace: 'nowrap',
+        flex: '0 0 auto', fontSize: 8.5, fontWeight: 650,
+        color: 'var(--dsw-alias-label-primary, #1f2430)',
+        background: NEUTRAL_ACTIVE, border: `1px solid ${STROKE}`,
+        padding: '1px 6px', borderRadius: 999, lineHeight: '11px',
+        whiteSpace: 'nowrap',
       });
       const rowCardStyle = (active) => ({
         display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px',
         borderRadius: 9, fontSize: 10.5, marginBottom: 4,
-        border: `1px solid ${active ? ACC_TINT(30) : STROKE}`,
-        background: SURFACE,
-        boxShadow: active ? `0 2px 8px ${ACC_TINT(10)}` : 'none',
+        border: `1px solid ${STROKE}`,
+        background: active ? NEUTRAL_ACTIVE : 'transparent',
         transition: 'background .15s, border-color .15s',
       });
       const PANEL_BG = SURFACE;
@@ -2065,10 +2068,11 @@ window.__ModuleLoader__.load({
             visibility: panelPos ? 'visible' : 'hidden',
             minWidth: 'min(280px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 12,
-            border: `1px solid ${STROKE}`,
+            borderRadius: 16,
+            border: 0,
             background: PANEL_BG,
-            boxShadow: '0 12px 30px rgba(0,0,0,.14), 0 2px 5px rgba(0,0,0,.05)',
+            '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
+            boxShadow: 'var(--dsw-elevation-prominent)',
             zIndex: 9999,
             overflow: 'hidden',
             display: 'flex',
@@ -2080,10 +2084,11 @@ window.__ModuleLoader__.load({
             right: 0,
             minWidth: 'min(280px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 12,
-            border: `1px solid ${STROKE}`,
+            borderRadius: 16,
+            border: 0,
             background: PANEL_BG,
-            boxShadow: '0 12px 30px rgba(0,0,0,.14), 0 2px 5px rgba(0,0,0,.05)',
+            '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
+            boxShadow: 'var(--dsw-elevation-prominent)',
             zIndex: 30,
             overflow: 'hidden',
             display: 'flex',
@@ -2156,13 +2161,12 @@ window.__ModuleLoader__.load({
                     'span',
                     {
                       style: {
-                        width: 16, height: 16, borderRadius: 5, background: ACC_G, flex: 'none',
+                        width: 16, height: 16, borderRadius: 5, background: NEUTRAL_ACTIVE, flex: 'none',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: `0 2px 6px ${ACC_TINT(30)}`,
                       },
                     },
                     h('svg', { width: 9, height: 9, viewBox: '0 0 24 24', fill: 'none' },
-                      h('path', { d: 'M13 2L4.5 13.5H11L10 22L19.5 9.5H12.5L13 2Z', fill: '#fff' })),
+                      h('path', { d: 'M13 2L4.5 13.5H11L10 22L19.5 9.5H12.5L13 2Z', fill: 'var(--dsw-alias-brand-primary, #4f7cf7)' })),
                   ),
                   h('span', { style: { fontSize: 11.5, fontWeight: 600, letterSpacing: '.2px', whiteSpace: 'nowrap' } }, t('failoverTitle')),
                 ),
@@ -2180,7 +2184,7 @@ window.__ModuleLoader__.load({
                     : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(currentIdx) })),
               ),
               // 紫色渐变细分隔线
-              h('div', { style: { height: 1, margin: '0 9px', background: `linear-gradient(90deg, transparent, ${ACC_TINT(18)}, transparent)` } }),
+              h('div', { style: { height: 1, margin: '0 9px', background: 'var(--dsw-alias-border-l1)' } }),
               // 面板顶部不再放独立提示行：探测结果 / 切换失败都并到底部工具条左侧，
               // 「上一轮真实请求」那行用户明确说没必要，已删除（面板空间留给路由本身）。
               // 队列条目
@@ -2262,7 +2266,7 @@ window.__ModuleLoader__.load({
                 {
                   style: {
                     padding: '4px 11px 6px',
-                    borderTop: `1px dashed ${ACC_TINT(20)}`,
+                    borderTop: '1px solid var(--dsw-alias-border-l1)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
