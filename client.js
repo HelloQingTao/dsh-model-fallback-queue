@@ -2143,7 +2143,7 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   style: {
-                    padding: '8px 11px 6px',
+                    padding: '6px 11px 4px',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -2261,7 +2261,7 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   style: {
-                    padding: '6px 11px 8px',
+                    padding: '4px 11px 6px',
                     borderTop: `1px dashed ${ACC_TINT(20)}`,
                     display: 'flex',
                     alignItems: 'center',
