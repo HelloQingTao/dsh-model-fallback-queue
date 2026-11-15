@@ -2019,37 +2019,35 @@ window.__ModuleLoader__.load({
           )
         : null;
 
-      // ---------- 设计令牌（版本 A：轻奢玻璃紫） ----------
-      // 强调色固定为紫（用户选定的设计）；面板/行表面仍走宿主 token，深色主题下不会变白板。
-      const ACC = '#6d4dfc';
-      const ACC_G = 'linear-gradient(135deg,#8b6bff,#6d4dfc)';
+      // ---------- 设计令牌（版本 A · 收敛版：跟随主题色 / 无背景染色 / 整体缩小） ----------
+      // 强调色跟随当前主题品牌色；面板与行表面改用宿主不透明层色（更白、不发灰），深色主题自动适配。
+      const ACC = 'var(--dsw-alias-brand-primary, #4f7cf7)';
+      const ACC_G = ACC; // 纯色，不再用渐变
       const ACC_TINT = (pct) => `color-mix(in srgb, ${ACC} ${pct}%, transparent)`;
-      const SURFACE = 'var(--dsw-alias-bg-overlay, var(--dsw-specific-menu, #ffffff))';
+      const SURFACE = 'var(--dsw-alias-bg-layer-1, var(--dsw-specific-menu, #ffffff))';
       const STROKE = 'var(--dsw-elevation-stroke-color, rgba(0,0,0,.08))';
       const mutedFg = 'var(--dsw-alias-label-secondary, #8a8798)';
       const idxChipStyle = (active) => ({
-        flex: '0 0 auto', fontSize: 10.5, fontWeight: 750, letterSpacing: '.3px',
-        padding: '3px 7px', borderRadius: 6, lineHeight: '14px',
+        flex: '0 0 auto', fontSize: 9.5, fontWeight: 750, letterSpacing: '.3px',
+        padding: '2px 6px', borderRadius: 5, lineHeight: '12px',
         ...(active
-          ? { background: ACC_G, color: '#fff', boxShadow: `0 2px 6px ${ACC_TINT(35)}` }
+          ? { background: ACC_G, color: '#fff', boxShadow: `0 1px 4px ${ACC_TINT(30)}` }
           : { background: 'var(--dsw-elevation-stroke-color, #f1f0f5)', color: mutedFg }),
       });
       const currentPillStyle = () => ({
-        flex: '0 0 auto', fontSize: 10.5, fontWeight: 650, color: '#fff',
-        background: ACC_G, padding: '3px 9px', borderRadius: 999, lineHeight: '14px',
-        boxShadow: `0 2px 6px ${ACC_TINT(30)}`, whiteSpace: 'nowrap',
+        flex: '0 0 auto', fontSize: 9.5, fontWeight: 650, color: '#fff',
+        background: ACC_G, padding: '2px 7px', borderRadius: 999, lineHeight: '12px',
+        boxShadow: `0 1px 4px ${ACC_TINT(28)}`, whiteSpace: 'nowrap',
       });
       const rowCardStyle = (active) => ({
-        display: 'flex', alignItems: 'center', gap: 9, padding: '10px 11px',
-        borderRadius: 12, fontSize: 12.5, marginBottom: 7,
-        border: `1px solid ${active ? ACC_TINT(34) : STROKE}`,
-        background: active
-          ? `linear-gradient(180deg, color-mix(in srgb, ${ACC} 7%, ${SURFACE}), ${SURFACE})`
-          : SURFACE,
-        boxShadow: active ? `0 4px 14px ${ACC_TINT(12)}` : 'none',
+        display: 'flex', alignItems: 'center', gap: 7, padding: '8px 9px',
+        borderRadius: 10, fontSize: 11.5, marginBottom: 5,
+        border: `1px solid ${active ? ACC_TINT(30) : STROKE}`,
+        background: SURFACE,
+        boxShadow: active ? `0 2px 8px ${ACC_TINT(10)}` : 'none',
         transition: 'background .15s, border-color .15s',
       });
-      const PANEL_BG = `linear-gradient(150deg, ${SURFACE}, color-mix(in srgb, ${ACC} 7%, ${SURFACE}))`;
+      const PANEL_BG = SURFACE;
 
       // 面板样式：portal 模式用 fixed + 量算坐标（面板在 body 顶层，不受 composer 裁剪）；
       // 拿不到 react-dom 时退回原位置 absolute，行为与原版一致。
@@ -2059,14 +2057,12 @@ window.__ModuleLoader__.load({
             left: panelPos ? panelPos.left : 0,
             top: panelPos ? panelPos.top : 0,
             visibility: panelPos ? 'visible' : 'hidden',
-            minWidth: 'min(360px, calc(100vw - 16px))',
+            minWidth: 'min(320px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 18,
-            border: `1px solid ${ACC_TINT(16)}`,
+            borderRadius: 14,
+            border: `1px solid ${STROKE}`,
             background: PANEL_BG,
-            backdropFilter: 'blur(18px) saturate(1.3)',
-            WebkitBackdropFilter: 'blur(18px) saturate(1.3)',
-            boxShadow: `0 18px 44px ${ACC_TINT(16)}, 0 2px 6px rgba(0,0,0,.06)`,
+            boxShadow: '0 12px 30px rgba(0,0,0,.14), 0 2px 5px rgba(0,0,0,.05)',
             zIndex: 9999,
             overflow: 'hidden',
             display: 'flex',
@@ -2076,14 +2072,12 @@ window.__ModuleLoader__.load({
             position: 'absolute',
             bottom: 'calc(100% + 10px)',
             right: 0,
-            minWidth: 'min(360px, calc(100vw - 16px))',
+            minWidth: 'min(320px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 18,
-            border: `1px solid ${ACC_TINT(16)}`,
+            borderRadius: 14,
+            border: `1px solid ${STROKE}`,
             background: PANEL_BG,
-            backdropFilter: 'blur(18px) saturate(1.3)',
-            WebkitBackdropFilter: 'blur(18px) saturate(1.3)',
-            boxShadow: `0 18px 44px ${ACC_TINT(16)}, 0 2px 6px rgba(0,0,0,.06)`,
+            boxShadow: '0 12px 30px rgba(0,0,0,.14), 0 2px 5px rgba(0,0,0,.05)',
             zIndex: 30,
             overflow: 'hidden',
             display: 'flex',
@@ -2139,7 +2133,7 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   style: {
-                    padding: '13px 16px 11px',
+                    padding: '10px 13px 8px',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -2147,27 +2141,27 @@ window.__ModuleLoader__.load({
                 },
                 h(
                   'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 } },
+                  { style: { display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 } },
                   h(
                     'span',
                     {
                       style: {
-                        width: 22, height: 22, borderRadius: 7, background: ACC_G, flex: 'none',
+                        width: 18, height: 18, borderRadius: 6, background: ACC_G, flex: 'none',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: `0 3px 8px ${ACC_TINT(35)}`,
+                        boxShadow: `0 2px 6px ${ACC_TINT(30)}`,
                       },
                     },
-                    h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none' },
+                    h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none' },
                       h('path', { d: 'M13 2L4.5 13.5H11L10 22L19.5 9.5H12.5L13 2Z', fill: '#fff' })),
                   ),
-                  h('span', { style: { fontSize: 14.5, fontWeight: 650, letterSpacing: '.2px', whiteSpace: 'nowrap' } }, t('failoverTitle')),
+                  h('span', { style: { fontSize: 13, fontWeight: 600, letterSpacing: '.2px', whiteSpace: 'nowrap' } }, t('failoverTitle')),
                 ),
                 !enabled
                   ? h('span', {
                       style: {
-                        fontSize: 11.5, fontWeight: 600, color: mutedFg, whiteSpace: 'nowrap',
-                        background: `color-mix(in srgb, ${ACC} 10%, ${SURFACE})`,
-                        padding: '4px 10px', borderRadius: 999,
+                        fontSize: 10.5, fontWeight: 600, color: mutedFg, whiteSpace: 'nowrap',
+                        background: 'var(--dsw-elevation-stroke-color, #f1f0f5)',
+                        padding: '3px 8px', borderRadius: 999,
                       },
                     }, t('badgeDisabled'))
                   : allTripped
@@ -2176,13 +2170,13 @@ window.__ModuleLoader__.load({
                     : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(currentIdx) })),
               ),
               // 紫色渐变细分隔线
-              h('div', { style: { height: 1, margin: '0 14px', background: `linear-gradient(90deg, transparent, ${ACC_TINT(18)}, transparent)` } }),
+              h('div', { style: { height: 1, margin: '0 11px', background: `linear-gradient(90deg, transparent, ${ACC_TINT(18)}, transparent)` } }),
               // 面板顶部不再放独立提示行：探测结果 / 切换失败都并到底部工具条左侧，
               // 「上一轮真实请求」那行用户明确说没必要，已删除（面板空间留给路由本身）。
               // 队列条目
               h(
                 'div',
-                { style: { padding: '8px 12px 4px', display: 'flex', flexDirection: 'column' } },
+                { style: { padding: '6px 9px 2px', display: 'flex', flexDirection: 'column' } },
                 h('div', {
                     key: 'p1-row',
                     ...(enabled && !p1IsCurrent
@@ -2208,11 +2202,11 @@ window.__ModuleLoader__.load({
                     h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 520, opacity: p1IsCurrent ? 1 : 0.75 } },
                       p1DisplayName),
                     p1Follow
-                      ? h('span', { style: { flex: '0 0 auto', fontSize: 11, color: mutedFg } }, t('sessionModelSuffix', { name: '' }))
+                      ? h('span', { style: { flex: '0 0 auto', fontSize: 10, color: mutedFg } }, t('sessionModelSuffix', { name: '' }))
                       : null),
                   p1IsCurrent
                     ? h('span', { style: currentPillStyle() }, t('currentTag'))
-                    : (startHere ? h('span', { style: { fontSize: 10, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
+                    : (startHere ? h('span', { style: { fontSize: 9, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
                   // 没有 P1 视图（还没发过消息、拿不到会话模型）时不能写"正常"：
                   // 那是在替一条从未验证过的路由打包票。
                   healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('healthUnprobed')),
@@ -2221,7 +2215,7 @@ window.__ModuleLoader__.load({
                   circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0
-                  ? [h('div', { key: 'empty', style: { padding: '10px 6px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, t('noFallbacks'))]
+                  ? [h('div', { key: 'empty', style: { padding: '8px 5px', fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, t('noFallbacks'))]
                   : entries.map((e) => {
                       // 队列下标就是生效位置，直接比（p1Follow 下 e.index===0 是 P2，不再排除）
                       const isActive = servedIdx !== null ? servedIdx === e.index : effective === e.index;
@@ -2243,7 +2237,7 @@ window.__ModuleLoader__.load({
                         ),
                         isActive
                           ? h('span', { style: currentPillStyle() }, t('currentTag'))
-                          : (startHereRow ? h('span', { style: { fontSize: 10, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
+                          : (startHereRow ? h('span', { style: { fontSize: 9, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
                         probeBadge(snap?.probeStatus?.[`${e.provider}\u0000${e.model}`]),
                         healthBadge(e, snap, Date.now()),
                         reviveButton(e, e.index),
@@ -2257,13 +2251,13 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   style: {
-                    padding: '10px 16px 13px',
-                    borderTop: `1px dashed ${ACC_TINT(22)}`,
+                    padding: '8px 13px 10px',
+                    borderTop: `1px dashed ${ACC_TINT(20)}`,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     gap: 8,
-                    fontSize: 11,
+                    fontSize: 10.5,
                     color: 'var(--dsw-alias-label-secondary)',
                   },
                 },
