@@ -13,6 +13,9 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
+    // react-dom 由宿主提供；拿不到时浮层退回原地渲染（不 portal），功能不丢。
+    let ReactDOM = null;
+    try { ReactDOM = require('react-dom'); } catch (e) { ReactDOM = null; }
 
     // ---------- 双语文案表（跟随宿主语言：<html lang> / navigator.language） ----------
 
@@ -1618,6 +1621,13 @@ window.__ModuleLoader__.load({
       const [sessionModelLabel, setSessionModelLabel] = React.useState(null); // null = 尚未从 DOM 解析到，语言无关的哨兵（不拿文案当哨兵）
       const [lastUncoveredName, setLastUncoveredName] = React.useState(null);
       const rootRef = React.useRef(null);
+      // 弹层 portal 到 body 后的面板引用：外部点击判定要连它一起排除，
+      // 否则点面板内部会被当成"外部点击"、面板还没响应就被关掉。
+      const panelRef = React.useRef(null);
+      // portal 模式下用 JS 量出来算的 fixed 坐标；null = 尚未测量（先隐藏避免闪位）。
+      const [panelPos, setPanelPos] = React.useState(null);
+      // react-dom 可用才 portal；否则退回原地 absolute 渲染（保底，不丢功能）。
+      const canPortal = Boolean(ReactDOM) && typeof document !== 'undefined';
       // 切换反馈的自动消失计时器（点完 2.6s 收掉提示条）
       const flashTimer = React.useRef(null);
       // DOM 取名函数存一份引用：点开弹层时要立刻重读一次，不能等 3s 轮询。
@@ -1790,7 +1800,10 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!open) return;
         const onDown = (e) => {
-          if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+          // 面板 portal 到 body 后不再是 rootRef 的子节点，要单独放过 panelRef 内部点击。
+          if (rootRef.current && rootRef.current.contains(e.target)) return;
+          if (panelRef.current && panelRef.current.contains(e.target)) return;
+          setOpen(false);
         };
         const onKey = (e) => {
           if (e.key === 'Escape') setOpen(false);
@@ -1802,6 +1815,42 @@ window.__ModuleLoader__.load({
           document.removeEventListener('keydown', onKey);
         };
       }, [open]);
+
+      // portal 模式定位：弹层被移到 body，脱离 composer 的裁剪/包含块（composer row 是
+      // container-type:inline-size 容器，absolute/fixed 都会被它裁）。这里量徽章与面板实际
+      // 尺寸算 fixed 坐标 + 视口夹取 + 上下翻转，窄窗口右侧/左侧都不会被切。
+      React.useLayoutEffect(() => {
+        if (!open || !canPortal) { setPanelPos(null); return undefined; }
+        const compute = () => {
+          const badge = rootRef.current;
+          const panel = panelRef.current;
+          if (!badge || !panel) return;
+          const b = badge.getBoundingClientRect();
+          const pw = panel.offsetWidth;
+          const ph = panel.offsetHeight;
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          const margin = 8; // 距视口边缘留白
+          const gap = 8;    // 面板与徽章之间的呼吸间距
+          // 水平：默认右对齐徽章右缘，越界再夹进视口
+          let left = b.right - pw;
+          if (left + pw > vw - margin) left = vw - margin - pw;
+          if (left < margin) left = margin;
+          // 垂直：默认放徽章上方（chip 在输入框底栏，上方空间更大）
+          let top = b.top - gap - ph;
+          if (top < margin) top = b.bottom + gap;                       // 上方放不下 → 翻到下方
+          if (top + ph > vh - margin) top = Math.max(margin, vh - margin - ph); // 下方也放不下 → 贴底夹取
+          setPanelPos((prev) => (prev && Math.abs(prev.left - left) < 0.5 && Math.abs(prev.top - top) < 0.5 ? prev : { left, top }));
+        };
+        compute();
+        window.addEventListener('resize', compute);
+        window.addEventListener('scroll', compute, true);
+        return () => {
+          window.removeEventListener('resize', compute);
+          window.removeEventListener('scroll', compute, true);
+        };
+        // 面板内容变化（条数 / 探测进度 / flash 反馈）会改变高度，触发重算
+      }, [open, canPortal, entries.length, snap?.probingAll, flash]);
       const p1Follow = snap?.p1Follow ?? true;
       const allTripped = entries.length > 0 && entries.every((e) => e.state === 'open');
       // 全熔断里只要有一条「探测已通过、只是冷却没到」，就不是死局：
@@ -1970,6 +2019,46 @@ window.__ModuleLoader__.load({
           )
         : null;
 
+      // 面板样式：portal 模式用 fixed + 量算坐标（面板在 body 顶层，不受 composer 裁剪）；
+      // 拿不到 react-dom 时退回原位置 absolute，行为与原版一致。
+      const panelStyle = canPortal
+        ? {
+            position: 'fixed',
+            left: panelPos ? panelPos.left : 0,
+            top: panelPos ? panelPos.top : 0,
+            visibility: panelPos ? 'visible' : 'hidden',
+            minWidth: 'min(360px, calc(100vw - 16px))',
+            maxWidth: 'calc(100vw - 16px)',
+            borderRadius: 12,
+            border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+            background: 'var(--dsw-specific-menu, var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, transparent)))',
+            backdropFilter: 'blur(18px) saturate(1.3)',
+            WebkitBackdropFilter: 'blur(18px) saturate(1.3)',
+            boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
+            zIndex: 9999,
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }
+        : {
+            position: 'absolute',
+            bottom: 'calc(100% + 10px)',
+            right: 0,
+            minWidth: 'min(360px, calc(100vw - 16px))',
+            maxWidth: 'calc(100vw - 16px)',
+            borderRadius: 12,
+            border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
+            background: 'var(--dsw-specific-menu, var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, transparent)))',
+            backdropFilter: 'blur(18px) saturate(1.3)',
+            WebkitBackdropFilter: 'blur(18px) saturate(1.3)',
+            boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
+            zIndex: 30,
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          };
+      const portalPanel = (node) => (canPortal ? ReactDOM.createPortal(node, document.body) : node);
+
       return h(
         'div',
         { ref: rootRef, style: { position: 'relative', display: 'inline-flex' } },
@@ -2007,25 +2096,11 @@ window.__ModuleLoader__.load({
           }),
         ),
         open
-          ? h(
+          ? portalPanel(h(
               'div',
               {
-                style: {
-                  position: 'absolute',
-                  bottom: 'calc(100% + 10px)',
-                  right: 0,
-                  minWidth: 360,
-                  borderRadius: 12,
-                  border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
-                  // 不用 #fff 兜底：token 拿不到时透明，让宿主背景透出来，
-                  // 硬编码白色在深色主题下会是一次整块白闪。
-                  background: 'var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, transparent))',
-                  boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
-                  zIndex: 30,
-                  overflow: 'hidden',
-                  display: 'flex',
-                  flexDirection: 'column',
-                },
+                ref: panelRef,
+                style: panelStyle,
               },
               // 标题行
               h(
@@ -2300,7 +2375,7 @@ window.__ModuleLoader__.load({
                     : null,
                 ),
               ),
-            )
+            ))
           : null,
       );
     }
