@@ -2019,6 +2019,38 @@ window.__ModuleLoader__.load({
           )
         : null;
 
+      // ---------- 设计令牌（版本 A：轻奢玻璃紫） ----------
+      // 强调色固定为紫（用户选定的设计）；面板/行表面仍走宿主 token，深色主题下不会变白板。
+      const ACC = '#6d4dfc';
+      const ACC_G = 'linear-gradient(135deg,#8b6bff,#6d4dfc)';
+      const ACC_TINT = (pct) => `color-mix(in srgb, ${ACC} ${pct}%, transparent)`;
+      const SURFACE = 'var(--dsw-alias-bg-overlay, var(--dsw-specific-menu, #ffffff))';
+      const STROKE = 'var(--dsw-elevation-stroke-color, rgba(0,0,0,.08))';
+      const mutedFg = 'var(--dsw-alias-label-secondary, #8a8798)';
+      const idxChipStyle = (active) => ({
+        flex: '0 0 auto', fontSize: 10.5, fontWeight: 750, letterSpacing: '.3px',
+        padding: '3px 7px', borderRadius: 6, lineHeight: '14px',
+        ...(active
+          ? { background: ACC_G, color: '#fff', boxShadow: `0 2px 6px ${ACC_TINT(35)}` }
+          : { background: 'var(--dsw-elevation-stroke-color, #f1f0f5)', color: mutedFg }),
+      });
+      const currentPillStyle = () => ({
+        flex: '0 0 auto', fontSize: 10.5, fontWeight: 650, color: '#fff',
+        background: ACC_G, padding: '3px 9px', borderRadius: 999, lineHeight: '14px',
+        boxShadow: `0 2px 6px ${ACC_TINT(30)}`, whiteSpace: 'nowrap',
+      });
+      const rowCardStyle = (active) => ({
+        display: 'flex', alignItems: 'center', gap: 9, padding: '10px 11px',
+        borderRadius: 12, fontSize: 12.5, marginBottom: 7,
+        border: `1px solid ${active ? ACC_TINT(34) : STROKE}`,
+        background: active
+          ? `linear-gradient(180deg, color-mix(in srgb, ${ACC} 7%, ${SURFACE}), ${SURFACE})`
+          : SURFACE,
+        boxShadow: active ? `0 4px 14px ${ACC_TINT(12)}` : 'none',
+        transition: 'background .15s, border-color .15s',
+      });
+      const PANEL_BG = `linear-gradient(150deg, ${SURFACE}, color-mix(in srgb, ${ACC} 7%, ${SURFACE}))`;
+
       // 面板样式：portal 模式用 fixed + 量算坐标（面板在 body 顶层，不受 composer 裁剪）；
       // 拿不到 react-dom 时退回原位置 absolute，行为与原版一致。
       const panelStyle = canPortal
@@ -2029,12 +2061,12 @@ window.__ModuleLoader__.load({
             visibility: panelPos ? 'visible' : 'hidden',
             minWidth: 'min(360px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 12,
-            border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
-            background: 'var(--dsw-specific-menu, var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, transparent)))',
+            borderRadius: 18,
+            border: `1px solid ${ACC_TINT(16)}`,
+            background: PANEL_BG,
             backdropFilter: 'blur(18px) saturate(1.3)',
             WebkitBackdropFilter: 'blur(18px) saturate(1.3)',
-            boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
+            boxShadow: `0 18px 44px ${ACC_TINT(16)}, 0 2px 6px rgba(0,0,0,.06)`,
             zIndex: 9999,
             overflow: 'hidden',
             display: 'flex',
@@ -2046,12 +2078,12 @@ window.__ModuleLoader__.load({
             right: 0,
             minWidth: 'min(360px, calc(100vw - 16px))',
             maxWidth: 'calc(100vw - 16px)',
-            borderRadius: 12,
-            border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))',
-            background: 'var(--dsw-specific-menu, var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, transparent)))',
+            borderRadius: 18,
+            border: `1px solid ${ACC_TINT(16)}`,
+            background: PANEL_BG,
             backdropFilter: 'blur(18px) saturate(1.3)',
             WebkitBackdropFilter: 'blur(18px) saturate(1.3)',
-            boxShadow: '0 8px 32px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08)',
+            boxShadow: `0 18px 44px ${ACC_TINT(16)}, 0 2px 6px rgba(0,0,0,.06)`,
             zIndex: 30,
             overflow: 'hidden',
             display: 'flex',
@@ -2102,34 +2134,55 @@ window.__ModuleLoader__.load({
                 ref: panelRef,
                 style: panelStyle,
               },
-              // 标题行
+              // 标题行（版本 A：紫色闪电图标 + 标题 + 状态胶囊）
               h(
                 'div',
                 {
                   style: {
-                    padding: '10px 14px',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                    padding: '13px 16px 11px',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                   },
                 },
-                t('failoverTitle'),
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 } },
+                  h(
+                    'span',
+                    {
+                      style: {
+                        width: 22, height: 22, borderRadius: 7, background: ACC_G, flex: 'none',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        boxShadow: `0 3px 8px ${ACC_TINT(35)}`,
+                      },
+                    },
+                    h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none' },
+                      h('path', { d: 'M13 2L4.5 13.5H11L10 22L19.5 9.5H12.5L13 2Z', fill: '#fff' })),
+                  ),
+                  h('span', { style: { fontSize: 14.5, fontWeight: 650, letterSpacing: '.2px', whiteSpace: 'nowrap' } }, t('failoverTitle')),
+                ),
                 !enabled
-                  ? h(Badge, { tone: 'muted' }, t('badgeDisabled'))
+                  ? h('span', {
+                      style: {
+                        fontSize: 11.5, fontWeight: 600, color: mutedFg, whiteSpace: 'nowrap',
+                        background: `color-mix(in srgb, ${ACC} 10%, ${SURFACE})`,
+                        padding: '4px 10px', borderRadius: 999,
+                      },
+                    }, t('badgeDisabled'))
                   : allTripped
                     ? h(Badge, { tone: anyRevivable ? 'warn' : 'error' },
                         anyRevivable ? t('badgeTrippedRevivable') : t('badgeAllTripped'))
                     : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(currentIdx) })),
               ),
+              // 紫色渐变细分隔线
+              h('div', { style: { height: 1, margin: '0 14px', background: `linear-gradient(90deg, transparent, ${ACC_TINT(18)}, transparent)` } }),
               // 面板顶部不再放独立提示行：探测结果 / 切换失败都并到底部工具条左侧，
               // 「上一轮真实请求」那行用户明确说没必要，已删除（面板空间留给路由本身）。
               // 队列条目
               h(
                 'div',
-                { style: { padding: '4px 8px', display: 'flex', flexDirection: 'column' } },
+                { style: { padding: '8px 12px 4px', display: 'flex', flexDirection: 'column' } },
                 h('div', {
                     key: 'p1-row',
                     ...(enabled && !p1IsCurrent
@@ -2146,19 +2199,20 @@ window.__ModuleLoader__.load({
                           }
                         : {}),
                     style: {
-                      display: 'flex', alignItems: 'center', gap: 10, padding: '4px 8px', borderRadius: 8, fontSize: 12,
-                      // 行间用一条极淡的分割线，比纯靠间距更清楚又不显眼。
-                      borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                      background: p1IsCurrent ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                      ...rowCardStyle(p1IsCurrent),
                       cursor: enabled && (p1Follow || !p1IsCurrent) ? 'pointer' : 'default',
                     },
                   },
-                  h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, 'P1'),
-                  h('span', { style: { flex: 1, opacity: p1IsCurrent ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                    p1Follow ? t('sessionModelSuffix', { name: p1DisplayName }) : p1DisplayName),
+                  h('span', { style: idxChipStyle(p1IsCurrent) }, 'P1'),
+                  h('span', { style: { flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 5 } },
+                    h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 520, opacity: p1IsCurrent ? 1 : 0.75 } },
+                      p1DisplayName),
+                    p1Follow
+                      ? h('span', { style: { flex: '0 0 auto', fontSize: 11, color: mutedFg } }, t('sessionModelSuffix', { name: '' }))
+                      : null),
                   p1IsCurrent
-                    ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
-                    : (startHere ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', opacity: 0.8 } }, t('startTag')) : null),
+                    ? h('span', { style: currentPillStyle() }, t('currentTag'))
+                    : (startHere ? h('span', { style: { fontSize: 10, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
                   // 没有 P1 视图（还没发过消息、拿不到会话模型）时不能写"正常"：
                   // 那是在替一条从未验证过的路由打包票。
                   healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('healthUnprobed')),
@@ -2178,26 +2232,18 @@ window.__ModuleLoader__.load({
                           key: e.index,
                           ...rowSwitchProps(isActive, e.index, lbl(e.index)),
                           style: {
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            padding: '4px 8px',
-                            borderRadius: 8,
-                            fontSize: 12,
-                            // 行间极淡分割线（见 P1 行说明）
-                            borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                            background: isActive ? 'var(--dsw-alias-brand-primary, #4f7cf7)' + '14' : 'transparent',
+                            ...rowCardStyle(isActive),
                             cursor: enabled && !isActive ? 'pointer' : 'default',
                           },
                         },
-                        h('strong', { style: { width: 22, fontSize: 11, opacity: 0.85 } }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),
-                        h('span', { style: { flex: 1, opacity: isActive ? 1 : 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 } },
-                          h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${e.provider} / ${e.model}`),
+                        h('span', { style: idxChipStyle(isActive) }, `P${e.index + (p1Follow ? 1 : 0) + 1}`),
+                        h('span', { style: { flex: 1, minWidth: 0, opacity: isActive ? 1 : 0.8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 } },
+                          h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 520 } }, `${e.provider} / ${e.model}`),
                           paidBadge(e.paid),
                         ),
                         isActive
-                          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
-                          : (startHereRow ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', opacity: 0.8 } }, t('startTag')) : null),
+                          ? h('span', { style: currentPillStyle() }, t('currentTag'))
+                          : (startHereRow ? h('span', { style: { fontSize: 10, color: mutedFg, opacity: 0.8 } }, t('startTag')) : null),
                         probeBadge(snap?.probeStatus?.[`${e.provider}\u0000${e.model}`]),
                         healthBadge(e, snap, Date.now()),
                         reviveButton(e, e.index),
@@ -2211,8 +2257,8 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   style: {
-                    padding: '8px 14px',
-                    borderTop: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                    padding: '10px 16px 13px',
+                    borderTop: `1px dashed ${ACC_TINT(22)}`,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
