@@ -2056,7 +2056,8 @@ window.__ModuleLoader__.load({
         background: active ? NEUTRAL_ACTIVE : 'transparent',
         transition: 'background .15s, border-color .15s',
       });
-      const PANEL_BG = SURFACE;
+      // 面板底=宿主菜单同款「磨砂玻璃」材质：半透明 specific-menu 底 + 毛玻璃模糊 + panel 级阴影（与模型选择器下拉一致）
+      const PANEL_BG = 'var(--dsw-menu-surface-fill, rgba(252,253,254,.7))';
 
       // 面板样式：portal 模式用 fixed + 量算坐标（面板在 body 顶层，不受 composer 裁剪）；
       // 拿不到 react-dom 时退回原位置 absolute，行为与原版一致。
@@ -2071,8 +2072,9 @@ window.__ModuleLoader__.load({
             borderRadius: 16,
             border: 0,
             background: PANEL_BG,
-            '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
-            boxShadow: 'var(--dsw-elevation-prominent)',
+            backdropFilter: 'var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%))',
+            WebkitBackdropFilter: 'var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%))',
+            boxShadow: 'var(--dsw-elevation-panel, 0 0 0 .5px rgba(0,0,0,.04),0 3px 8px 0 rgba(0,0,0,.04),0 0 20px 0 rgba(0,0,0,.05))',
             zIndex: 9999,
             overflow: 'hidden',
             display: 'flex',
@@ -2087,8 +2089,9 @@ window.__ModuleLoader__.load({
             borderRadius: 16,
             border: 0,
             background: PANEL_BG,
-            '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
-            boxShadow: 'var(--dsw-elevation-prominent)',
+            backdropFilter: 'var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%))',
+            WebkitBackdropFilter: 'var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%))',
+            boxShadow: 'var(--dsw-elevation-panel, 0 0 0 .5px rgba(0,0,0,.04),0 3px 8px 0 rgba(0,0,0,.04),0 0 20px 0 rgba(0,0,0,.05))',
             zIndex: 30,
             overflow: 'hidden',
             display: 'flex',
