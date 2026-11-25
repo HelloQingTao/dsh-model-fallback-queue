@@ -2537,6 +2537,7 @@ export function apply(ctx, pluginConfig = {}) {
       }
       let yieldedVisible = false;
       let finished = false;
+      let it = null; // 手动迭代后 break 不再自动触发 iterator.return()，finally 需要它做收尾
       const idleMs = effectiveIdleTimeoutMs();
       const stalledMs = effectiveStalledTimeoutMs();
       try {
@@ -2544,7 +2545,7 @@ export function apply(ctx, pluginConfig = {}) {
         // 裸 for-await 会永久等待，宿主 agent-loop 同样等不到终态帧 → 会话永久转圈。
         // 改成带静默超时的单步读取：首帧前用 idle 档，吐过可见内容后用 stalled 档；
         // 0=关闭该级，退化为原来的无限等待（用户显式关闭时尊重旧行为）。
-        const it = sub[Symbol.asyncIterator]();
+        it = sub[Symbol.asyncIterator]();
         while (true) {
           const limit = yieldedVisible ? stalledMs : idleMs;
           const step = await nextStepWithTimeout(it, limit);
@@ -2611,14 +2612,31 @@ export function apply(ctx, pluginConfig = {}) {
           return;
         }
       } finally {
-        if (!finished && typeof sub?.interrupt === 'function') {
-          // issue #4 的第二个卡死点：有些适配器的 interrupt() 本身也永不 settle
-          // （复现脚本的 hang 流就是这样）。绝不能 await —— 只发信号 + 吞掉 rejection，
-          // 让本函数能立刻把控制权交还给 for 循环去换下一条路由。
+        if (!finished) {
+          // issue #4 收尾①：手动迭代 `break` 不再触发 for-await 的自动 return()，
+          // 这里显式补一次迭代器 return，让上游生成器的 finally/清理逻辑有机会执行。
+          // 某些流根本没有 interrupt()，收尾全靠这一步，不能省。fire-and-forget，避免它不 settle 卡死。
           try {
-            const p = sub.interrupt();
-            if (p && typeof p.catch === 'function') p.catch(() => {});
+            const r = it?.return?.();
+            if (r && typeof r.catch === 'function') r.catch(() => {});
           } catch { /* ignore */ }
+          // issue #4 收尾②：适配器中断。正常清理照常 await，但最多等 300ms——有些适配器
+          // 的 interrupt() 自己就永不 settle，无上限 await 会变成第二个卡死点；限时赛跑两头兼顾。
+          if (typeof sub?.interrupt === 'function') {
+            try {
+              const p = Promise.resolve().then(() => sub.interrupt());
+              let timer = null;
+              const cap = new Promise((resolve) => {
+                timer = setTimeout(resolve, 300);
+                if (timer && typeof timer.unref === 'function') timer.unref();
+              });
+              try {
+                await Promise.race([p, cap]);
+              } finally {
+                if (timer) clearTimeout(timer);
+              }
+            } catch { /* ignore */ }
+          }
         }
       }
       if (yieldedVisible) {
