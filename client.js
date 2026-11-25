@@ -180,6 +180,8 @@ window.__ModuleLoader__.load({
         pingInterval: '间隔（毫秒，0=关闭；60000=每分钟）',
         pingSkipPaid: '跳过付费模型（省配额）',
         pingMaxTokens: '探测 maxTokens（默认 8，过小部分网关会拒）',
+        routeIdleTimeout: '首帧静默超时（毫秒，0=关闭；默认 300000=5分钟）',
+        routeStalledTimeout: '帧间静默超时（毫秒，0=关闭；默认 180000=3分钟）',
         pingCostWarn: '⚠ 会发送真实请求、产生少量调用',
         // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
@@ -357,6 +359,8 @@ window.__ModuleLoader__.load({
         pingInterval: 'Interval (ms, 0 = off; 60000 = every minute)',
         pingSkipPaid: 'Skip paid models (saves quota)',
         pingMaxTokens: 'Probe maxTokens (default 8; too small may be rejected)',
+        routeIdleTimeout: 'First-frame idle timeout (ms, 0=off; default 300000=5min)',
+        routeStalledTimeout: 'Between-frames idle timeout (ms, 0=off; default 180000=3min)',
         pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens per above, default 8) and may consume a little quota; it stays off until you set an interval above',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
@@ -1180,6 +1184,9 @@ window.__ModuleLoader__.load({
       const [pingDraft, setPingDraft] = React.useState(null);
       // 探测体 maxTokens 的本地草稿（同样的理由：每敲一下就落盘会把输入顶回旧值）
       const [pingTokensDraft, setPingTokensDraft] = React.useState(null);
+      // 路由静默超时的本地草稿（首帧空闲 / 帧间停滞，同样失焦才落盘）
+      const [idleTimeoutDraft, setIdleTimeoutDraft] = React.useState(null);
+      const [stalledTimeoutDraft, setStalledTimeoutDraft] = React.useState(null);
       // 周期探测（高级）：默认折叠，把设置项藏起来、让主界面更简洁；后端能力完整保留。
       const [showProbeAdv, setShowProbeAdv] = React.useState(false);
       // F5 拖动排序状态：dragFrom = 正在拖的行下标，dragOver = 当前悬停的目标行下标。
@@ -1248,6 +1255,23 @@ window.__ModuleLoader__.load({
         if (raw === null) return;
         const v = Math.max(1, Math.min(512, Math.floor(Number(raw) || 8)));
         if (v !== (Number(cfg.pingMaxTokens) || 8)) void patch({ pingMaxTokens: v });
+      };
+
+      // 路由静默超时：毫秒，0=关闭；与 index.js 的 DEFAULT_CONFIG 默认值一致，
+      // 失焦/回车才提交（每敲一下就落盘会被服务端回写顶回旧值）。
+      const commitIdleTimeout = () => {
+        const raw = idleTimeoutDraft;
+        setIdleTimeoutDraft(null);
+        if (raw === null) return;
+        const v = Math.max(0, Math.floor(Number(raw) || 0));
+        if (v !== (Number(cfg.routeIdleTimeoutMs) || 300000)) void patch({ routeIdleTimeoutMs: v });
+      };
+      const commitStalledTimeout = () => {
+        const raw = stalledTimeoutDraft;
+        setStalledTimeoutDraft(null);
+        if (raw === null) return;
+        const v = Math.max(0, Math.floor(Number(raw) || 0));
+        if (v !== (Number(cfg.routeStalledTimeoutMs) || 180000)) void patch({ routeStalledTimeoutMs: v });
       };
 
       // 队列写路径：只落 state 文件，不碰 settings，因此不会触发宿主主题全量重算
@@ -1534,6 +1558,34 @@ window.__ModuleLoader__.load({
                 style: { width: 90, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
               }),
               t('pingMaxTokens'),
+            ),
+            // 路由静默超时（issue #4）：首帧空闲 / 帧间停滞多久判这条路由死了并换路。
+            // 与探测旋钮同款受控草稿 + 失焦提交，视觉完全复用，避免新样式。
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
+              h('input', {
+                type: 'number',
+                min: 0,
+                step: 1000,
+                value: idleTimeoutDraft === null ? (Number(cfg.routeIdleTimeoutMs) || 0) : idleTimeoutDraft,
+                onChange: (e) => setIdleTimeoutDraft(e.target.value),
+                onBlur: commitIdleTimeout,
+                onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
+                style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
+              }),
+              t('routeIdleTimeout'),
+            ),
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
+              h('input', {
+                type: 'number',
+                min: 0,
+                step: 1000,
+                value: stalledTimeoutDraft === null ? (Number(cfg.routeStalledTimeoutMs) || 0) : stalledTimeoutDraft,
+                onChange: (e) => setStalledTimeoutDraft(e.target.value),
+                onBlur: commitStalledTimeout,
+                onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
+                style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
+              }),
+              t('routeStalledTimeout'),
             ),
             h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-state-warn-primary, #c98a1b)' } }, t('pingCostWarn')),
           ),
