@@ -2,6 +2,34 @@
 
 本项目更新日志按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.8] - 2026-11-25
+
+### Added
+
+- **Route silence timeout settings** — new options in Settings let you choose how long a model may stay silent before the queue switches to the next one; set to 0 to turn it off.
+
+### Fixed
+
+- **Stuck after failover** — when a model accepted the request but never returned any output, the conversation could spin forever; it now ends the turn or switches instead of hanging.
+- **Chip popover clipped** — in narrow windows the model chip popover could be cut off; it now stays fully visible.
+
+### Improved
+
+- **Chip popover look** — frosted-glass surface that follows the current theme, more compact layout, and it expands on hover and collapses when you move away.
+
+### 新增
+
+- **路由静默超时设置** — 设置页新增两个选项，可自定义模型静默多久后自动换路；设为 0 即关闭。
+
+### 修复
+
+- **切换后卡死** — 当模型已接受请求却迟迟不返回内容时，对话可能一直转圈；现在会自动结束本轮或换路，不再卡住。
+- **芯片弹层被裁剪** — 窄窗口下模型芯片弹层会被裁掉，现在能完整显示。
+
+### 优化
+
+- **芯片弹层外观** — 磨砂玻璃质感、跟随当前主题，布局更紧凑，悬停自动展开、移开自动收起。
+
 ## [0.3.7] - 2026-11-12
 
 ### Fixes
