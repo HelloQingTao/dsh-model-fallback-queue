@@ -45,6 +45,15 @@ const DEFAULT_CONFIG = {
   p1Follow: true, // P1 跟随当前模型（用户在 UI 手动换模型时 P1 自动跟随）
   immediateCodes: DEFAULT_IMMEDIATE_CODES,
   failureThreshold: 2,
+  // issue #4：上游"接了请求却零帧产出"时，llm/stream 的 for-await 会永久等待，
+  // 宿主 agent-loop 同样等不到终态帧 → 会话永久转圈。两级静默超时把"永不 settle
+  // 的子流"也当成一次失败，交给队列继续换路。0 = 关闭（回退到旧行为）。
+  // idle：从子流开始到收到第一帧的上限；默认 300s（reasoning high/max 首帧确实可能很慢）。
+  //       同时跟随适配器首帧超时环境变量取 max，保证插件不比适配器更早判死。
+  routeIdleTimeoutMs: 300_000,
+  // stalled：已收到帧后，两帧之间的静默上限；默认 180s。
+  //          已吐可见内容后超时不换路（避免半截回答被截断换路），但补 finish{error} 终态。
+  routeStalledTimeoutMs: 180_000,
   cooldownMs: 60_000,
   failbackMode: 'sticky', // 'sticky' | 'probe' | 'manual'
   failbackDelayMs: 5 * 60_000, // probe 模式防抖
@@ -2401,6 +2410,50 @@ export function apply(ctx, pluginConfig = {}) {
     return { ...chunk, reason: { ...chunk.reason, failure: { ...failure, providerRetryAfterMs: waitMs } } };
   }
 
+  // issue #4 —— 静默超时辅助 --------------------------------------------------
+  // 已知适配器的"首帧超时"环境变量（作者 issue 原文给出）。插件的 idle 超时取
+  // max(自身配置, 这些值)：适配器愿意等多久，插件就至少等多久，绝不比适配器更早
+  // 判死。内置默认 idle=300s 已覆盖这些适配器的出厂默认（qoder 120s / codearts
+  // 300s），运行时若某个适配器被显式调得更大，这里自动跟随抬高。
+  const ADAPTER_FIRST_TOKEN_ENV = ['DSH_QODER_SSE_FIRST_TOKEN_TIMEOUT_MS', 'DSH_CODEARTS_SSE_FIRST_TOKEN_TIMEOUT_MS'];
+
+  /**
+   * 生效的 idle 超时（毫秒）。0 = 关闭该级，此时不做任何跟随。
+   */
+  function effectiveIdleTimeoutMs() {
+    const configured = Number(config.routeIdleTimeoutMs);
+    if (!(configured > 0)) return 0;
+    let ceiling = 0;
+    for (const name of ADAPTER_FIRST_TOKEN_ENV) {
+      const v = Number(process.env?.[name]);
+      if (Number.isFinite(v) && v > ceiling) ceiling = v;
+    }
+    return Math.max(configured, ceiling);
+  }
+
+  /** 生效的 stalled 超时（毫秒）。0 = 关闭。 */
+  function effectiveStalledTimeoutMs() {
+    const v = Number(config.routeStalledTimeoutMs);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }
+
+  /**
+   * 带静默超时的 async iterator 单步读取。
+   * ms<=0 时退化为普通 next()（0=关闭）。超时返回 { __timeout: true }，不 cancel
+   * 底层 next()（交给调用方发 interrupt 信号），且吞掉它后续的 reject 避免
+   * unhandled rejection。每个 timer 都在 next settle 时 clear，不残留。
+   */
+  function nextStepWithTimeout(iterator, ms) {
+    if (!(ms > 0)) return iterator.next();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ __timeout: true }), ms);
+      iterator.next().then(
+        (step) => { clearTimeout(timer); resolve(step); },
+        (err) => { clearTimeout(timer); resolve({ __error: err }); },
+      );
+    });
+  }
+
   // 内部子请求的 options 对象集合：llm/stream 监听器看到它们直接放行，避免递归包裹。
   const internalStreamOptions = new WeakSet();
 
@@ -2484,8 +2537,40 @@ export function apply(ctx, pluginConfig = {}) {
       }
       let yieldedVisible = false;
       let finished = false;
+      const idleMs = effectiveIdleTimeoutMs();
+      const stalledMs = effectiveStalledTimeoutMs();
       try {
-        for await (const chunk of sub) {
+        // issue #4：上游可能"接了请求却零帧产出"——子流既不吐帧也不结束，
+        // 裸 for-await 会永久等待，宿主 agent-loop 同样等不到终态帧 → 会话永久转圈。
+        // 改成带静默超时的单步读取：首帧前用 idle 档，吐过可见内容后用 stalled 档；
+        // 0=关闭该级，退化为原来的无限等待（用户显式关闭时尊重旧行为）。
+        const it = sub[Symbol.asyncIterator]();
+        while (true) {
+          const limit = yieldedVisible ? stalledMs : idleMs;
+          const step = await nextStepWithTimeout(it, limit);
+          if (step.__timeout) {
+            const code = 'TIMEOUT';
+            const message = yieldedVisible
+              ? `路由在 ${limit}ms 内无后续帧（流中途静默挂起）`
+              : `路由在 ${limit}ms 内未产出首帧（上游接受请求但零帧）`;
+            // TIMEOUT 在 TRANSPORT_CODES 里 → recordFailure 按 failureThreshold
+            // 累计，不一次熔断（issue #4 建议）。
+            router.recordFailure(route, code, message, null, null);
+            if (yieldedVisible) {
+              // 已吐过可见内容：不能换路（半截回答），但必须补错误终态交给下游，
+              // 不能悄悄结束——否则宿主还在等 finish，照样转圈。
+              markRequest('fail', code);
+              yield { type: 'finish', reason: { kind: 'error', failure: { code, message } } };
+              return;
+            }
+            // 还没吐内容：当一次失败换下一条；记下 synth 帧供整链全挂时吐给下游。
+            markRequest('fail', code);
+            lastFailure = { type: 'finish', reason: { kind: 'error', failure: { code, message } } };
+            break;
+          }
+          if (step.__error) throw step.__error;
+          if (step.done) break;
+          const chunk = step.value;
           const isFinish = chunk?.type === 'finish';
           const kind = chunk?.reason?.kind;
           const failedFinish = isFinish && (kind === 'error' || kind === 'aborted');
@@ -2527,7 +2612,13 @@ export function apply(ctx, pluginConfig = {}) {
         }
       } finally {
         if (!finished && typeof sub?.interrupt === 'function') {
-          try { await sub.interrupt(); } catch { /* ignore */ }
+          // issue #4 的第二个卡死点：有些适配器的 interrupt() 本身也永不 settle
+          // （复现脚本的 hang 流就是这样）。绝不能 await —— 只发信号 + 吞掉 rejection，
+          // 让本函数能立刻把控制权交还给 for 循环去换下一条路由。
+          try {
+            const p = sub.interrupt();
+            if (p && typeof p.catch === 'function') p.catch(() => {});
+          } catch { /* ignore */ }
         }
       }
       if (yieldedVisible) {
@@ -2617,6 +2708,10 @@ export const Config = s.object({
   p1Follow: s.boolean().default(DEFAULT_CONFIG.p1Follow).description('P1 跟随当前会话模型').volatile(),
   immediateCodes: s.array(s.string()).default(DEFAULT_IMMEDIATE_CODES).description('命中即熔断的错误码').volatile(),
   failureThreshold: s.number().default(DEFAULT_CONFIG.failureThreshold).description('连续失败次数阈值（软熔断）').volatile(),
+  // issue #4 静默超时：上游接了请求却零帧/半截挂起时，主动判失败并继续队列。
+  // 0 = 关闭该级超时。idle 会跟随适配器首帧超时环境变量取 max（插件不早于适配器判死）。
+  routeIdleTimeoutMs: s.number().default(DEFAULT_CONFIG.routeIdleTimeoutMs).description('路由首帧静默超时毫秒（0=关闭；自动跟随适配器首帧超时取较大值）').volatile(),
+  routeStalledTimeoutMs: s.number().default(DEFAULT_CONFIG.routeStalledTimeoutMs).description('路由帧间静默超时毫秒（0=关闭）').volatile(),
   cooldownMs: s.number().default(DEFAULT_CONFIG.cooldownMs).description('熔断冷却毫秒').volatile(),
   failbackMode: s.union(['sticky', 'probe', 'manual']).default(DEFAULT_CONFIG.failbackMode).description('P1 恢复策略').volatile(),
   failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
